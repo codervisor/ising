@@ -1,7 +1,7 @@
 ---
 status: planned
 created: 2026-03-04
-priority: medium
+priority: low
 tags:
 - phase-3
 - cloud
@@ -9,8 +9,9 @@ depends_on:
 - 002-scip-loader
 - 005-lsp-vs-scip-research
 created_at: 2026-03-04T01:48:38.439898044Z
-updated_at: 2026-03-04T03:03:55.087194138Z
+updated_at: 2026-03-04T03:15:26.605458427Z
 ---
+
 # Containerized Workers — Cloud Analysis
 
 ## Overview
