@@ -11,7 +11,6 @@ depends_on:
 created_at: 2026-03-04T01:48:38.439719280Z
 updated_at: 2026-03-04T03:03:55.077914015Z
 ---
-
 # SCIP Loader — Index Integration
 
 ## Overview
@@ -20,28 +19,81 @@ Translate SCIP (Source Code Intelligence Protocol) protobuf index files into the
 
 ## Design
 
-- Parse `.scip` protobuf files to extract symbol occurrences (definitions and references).
-- Map each definition to a `Symbol` node in `IsingGraph`.
-- Map each reference to a directed edge from the referencing symbol to the referenced symbol.
-- Support incremental loading for large codebases.
+### Crate placement
+
+New crate `ising-scip` in the workspace. Keeps indexing concerns separate from the core graph/physics engine. Depends on `ising-core` for `IsingGraph`, `Symbol`, and `SymbolKind`.
+
+### Dependencies
+
+- `scip` crate (v0.6.x) — provides Protobuf types for the SCIP schema (`scip::types::Index`, `Document`, `Occurrence`, `SymbolInformation`).
+- `protobuf` — transitive via `scip` crate; needed for parsing `.scip` files.
+
+### Core API
+
+    pub struct ScipLoader;
+
+    impl ScipLoader {
+        /// Load a `.scip` file and return a populated IsingGraph.
+        pub fn load_from_file(path: &Path) -> Result<IsingGraph, ScipError>;
+
+        /// Load from an already-parsed SCIP Index.
+        pub fn load_from_index(index: &scip::types::Index) -> Result<IsingGraph, ScipError>;
+    }
+
+### Symbol mapping
+
+| SCIP SymbolInformation.Kind | IsingGraph SymbolKind |
+|---|---|
+| Function, Method, Macro | Function |
+| Class, Enum, Struct | Class |
+| Package, Namespace | Module |
+| Variable, Constant, Property | Variable |
+| Interface, Trait, Protocol | Interface |
+| Everything else | Other(string) |
+
+### Processing pipeline
+
+1. Read `.scip` file → deserialize into `scip::types::Index`.
+2. Iterate `index.documents` — each Document represents one file.
+3. For each Document, iterate `occurrences`:
+   - Definition occurrences (role = Definition) → `IsingGraph::add_symbol()`.
+   - Reference occurrences (role = Reference) → `IsingGraph::add_dependency(referencing_symbol, referenced_symbol)`.
+4. Symbol identification uses SCIP's fully-qualified symbol string as the `Symbol::name`.
+5. Cross-file references handled naturally since SCIP symbol identifiers are globally unique.
+
+### Error handling
+
+    #[derive(Debug, thiserror::Error)]
+    pub enum ScipError {
+        #[error("failed to read SCIP file: {0}")]
+        Io(#[from] std::io::Error),
+        #[error("failed to parse SCIP protobuf: {0}")]
+        Parse(#[from] protobuf::Error),
+        #[error("invalid SCIP data: {0}")]
+        InvalidData(String),
+    }
 
 ## Plan
 
-- [ ] Add protobuf/prost dependency for SCIP parsing
-- [ ] Define SCIP proto schema (or use existing scip crate)
-- [ ] Implement `ScipLoader` that reads `.scip` files
-- [ ] Map SCIP occurrences to `IsingGraph` nodes and edges
-- [ ] Handle cross-file references
+- [ ] Create `ising-scip` crate in workspace
+- [ ] Add `scip` crate dependency, verify protobuf types compile
+- [ ] Implement `ScipLoader::load_from_file` and `load_from_index`
+- [ ] Implement symbol kind mapping (SCIP → SymbolKind)
+- [ ] Implement occurrence processing (definitions → nodes, references → edges)
+- [ ] Add `ScipError` error type
 - [ ] Integration tests with sample `.scip` files
 
 ## Test
 
-- [ ] Parse a minimal `.scip` file with 2 symbols
-- [ ] Cross-file reference creates correct edge
-- [ ] Unknown symbol references are handled gracefully
-- [ ] Performance test with large index file
+- [ ] Parse a minimal `.scip` file with 2 symbols and 1 reference
+- [ ] Cross-file reference creates correct directed edge
+- [ ] Unknown/malformed symbol references produce `ScipError::InvalidData`
+- [ ] SCIP symbol kinds map correctly to `SymbolKind`
+- [ ] Empty `.scip` file returns empty IsingGraph
+- [ ] Round-trip: generate `.scip` with `rust-analyzer scip .` on a sample crate, load, verify node/edge counts
 
-## Notes
+## Open Questions (resolved)
 
-- SCIP is used by Sourcegraph and supports many languages via `scip-python`, `scip-typescript`, `scip-java`, etc.
-- Consider using the `scip` crate from crates.io if available, otherwise generate from proto definitions.
+- **Which crate?** → `scip` v0.6.x from crates.io (confirmed available).
+- **Separate crate or module?** → Separate `ising-scip` crate to keep `ising-core` dependency-light.
+- **Incremental loading?** → Deferred. V1 loads full `.scip` file. Can add streaming later if perf requires it.

@@ -11,7 +11,6 @@ depends_on:
 created_at: 2026-03-04T01:48:38.439898044Z
 updated_at: 2026-03-04T03:03:55.087194138Z
 ---
-
 # Containerized Workers — Cloud Analysis
 
 ## Overview
@@ -20,28 +19,72 @@ Containerized workers that encapsulate language-specific SCIP indexers (e.g., `s
 
 ## Design
 
-- Docker image with pre-installed SCIP indexers for target languages.
-- Entrypoint script: `git clone` → run indexer → produce `.scip` → run `ising-core` analysis.
-- Output: JSON report with HealthScore, λ_max, modularity Q, and identified clusters.
-- Support for multiple languages via composable indexer images.
+### Container architecture
+
+- **Base image**: Debian slim + Rust binary (`ising-cli`) for analysis.
+- **Language images**: Extend base with language runtime + SCIP indexer.
+  - `ising-worker-python`: Python 3.x + `scip-python`
+  - `ising-worker-typescript`: Node.js + `scip-typescript`
+- **Multi-stage builds**: Build Rust binary in builder stage, copy to slim runtime.
+
+### Workflow (entrypoint)
+
+1. `git clone --depth 1 <repo_url>` into working directory.
+2. Auto-detect primary language(s) from file extensions / config files.
+3. Run SCIP indexer: `scip-<lang> index --output index.scip`.
+4. Run `ising-cli analyze index.scip` → produce JSON report.
+5. Output JSON to stdout / upload to configured endpoint.
+
+### Output JSON schema
+
+    {
+      "repository": "owner/repo",
+      "commit": "abc123",
+      "timestamp": "2026-03-04T12:00:00Z",
+      "health": {
+        "lambda_max": 1.42,
+        "status": "critical",   // "stable" | "critical"
+        "modularity_q": 0.35
+      },
+      "summary": {
+        "symbols": 1200,
+        "dependencies": 3400
+      }
+    }
+
+### Language detection
+
+Priority-ordered check:
+1. Presence of language-specific config files (`pyproject.toml`, `package.json`, `Cargo.toml`, etc.).
+2. File extension frequency analysis as fallback.
 
 ## Plan
 
-- [ ] Design Dockerfile with multi-stage build (indexers + Rust binary)
-- [ ] Create entrypoint script for clone → index → analyze workflow
-- [ ] Define JSON output schema for analysis results
-- [ ] Support language auto-detection
-- [ ] Add CI/CD pipeline for building and publishing container images
-- [ ] Integration tests with sample repositories
+- [ ] Create `ising-cli` binary crate with `analyze` subcommand (reads `.scip`, outputs JSON)
+- [ ] Define Dockerfile for base image (Rust binary only)
+- [ ] Create Python worker Dockerfile (base + Python + scip-python)
+- [ ] Create TypeScript worker Dockerfile (base + Node + scip-typescript)
+- [ ] Implement entrypoint script (clone → detect → index → analyze)
+- [ ] Implement language auto-detection logic
+- [ ] Integration test: Python repo end-to-end
+- [ ] Integration test: TypeScript repo end-to-end
+- [ ] CI pipeline for container image builds
 
 ## Test
 
-- [ ] Container builds successfully
-- [ ] End-to-end: clone a small Python repo → produce valid JSON report
-- [ ] Language auto-detection works for Python, TypeScript
-- [ ] Graceful failure on unsupported languages
+- [ ] Base container builds successfully
+- [ ] End-to-end: clone a small Python repo → valid JSON report with correct schema
+- [ ] End-to-end: clone a small TypeScript repo → valid JSON report
+- [ ] Language auto-detection: Python project detected from `pyproject.toml`
+- [ ] Graceful error on unsupported language (non-zero exit + error JSON)
+
+## Prerequisites
+
+- `ising-cli` binary depends on `ising-scip` (002) for `.scip` loading.
+- `ising-core` modularity Q (001 remaining item) needed for full `health` output.
 
 ## Notes
 
-- Start with Python and TypeScript indexers as first-class citizens.
-- Consider using GitHub Actions or similar CI for automated container builds.
+- Start with Python and TypeScript as first-class. Other languages added by extending the pattern.
+- `gossiphs` (tree-sitter based) identified in 005 as potential lightweight fallback for unsupported languages — deferred to a future spec.
+- Security: containers run with read-only filesystem, no network after clone, resource limits enforced by orchestrator.
