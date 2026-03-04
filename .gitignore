@@ -26,3 +26,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# SCIP
+*.scip
+*.scip.json
