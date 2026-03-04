@@ -1,0 +1,20 @@
+{
+  "name": "@codervisor/ising-cli",
+  "version": "0.1.0",
+  "description": "CLI for local Ising maintainability analysis",
+  "license": "MIT",
+  "scripts": {
+    "build": "echo 'native binary — no JS build step'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codervisor/ising"
+  },
+  "bin": {
+    "ising": "bin/ising.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "optionalDependencies": {}
+}

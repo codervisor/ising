@@ -3,7 +3,15 @@
  *
  * Distributes the `ising` CLI binary via npm platform packages.
  */
-import type { PublishConfig } from '@codervisor/forge';
+
+interface PublishConfig {
+  scope: string;
+  binaries: { name: string; scope: string; cargoPackage: string }[];
+  platforms: string[];
+  mainPackages: { path: string; name: string }[];
+  cargoWorkspace: string;
+  repositoryUrl: string;
+}
 
 export default {
   scope: '@codervisor',
@@ -15,7 +23,7 @@ export default {
   platforms: ['darwin-x64', 'darwin-arm64', 'linux-x64', 'windows-x64'],
 
   mainPackages: [
-    { path: 'packages/cli', name: '@codervisor/cli' },
+    { path: 'packages/cli', name: '@codervisor/ising-cli' },
   ],
 
   cargoWorkspace: 'Cargo.toml',
