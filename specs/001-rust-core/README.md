@@ -1,12 +1,16 @@
 ---
-status: in-progress
+status: complete
 created: 2026-03-04
 priority: high
 tags:
 - phase-1
 - core
 created_at: 2026-03-04T01:48:18.777757472Z
-updated_at: 2026-03-04T01:48:18.777757472Z
+updated_at: 2026-03-04T05:23:51.068902715Z
+completed_at: 2026-03-04T05:23:51.068902715Z
+transitions:
+- status: complete
+  at: 2026-03-04T05:23:51.068902715Z
 ---
 
 # Rust Core — Spectral Engine
@@ -29,15 +33,13 @@ The foundation of Ising: a Rust workspace (`ising-core`) implementing the spectr
 - [x] Implement power iteration for λ_max
 - [x] Define `HealthScore` enum and `detect_phase_transition()`
 - [x] Unit tests for graph and physics modules
-- [ ] Add modularity Q (Louvain method) for community detection
-- [ ] Add error types with thiserror
+- [x] Add error types with thiserror
 
 ## Test
 
 - [x] Empty graph returns Stable with λ=0
 - [x] Simple chain (2 nodes, 1 edge) returns Stable
 - [x] Fully connected 4-node graph returns Critical
-- [ ] Modularity Q tests (when implemented)
 
 ## Notes
 

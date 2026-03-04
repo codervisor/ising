@@ -112,7 +112,7 @@ mod tests {
         let mut g = IsingGraph::new();
         g.add_symbol(make_symbol("a"));
         g.add_symbol(make_symbol("b"));
-        g.add_dependency("a", "b");
+        g.add_dependency("a", "b").unwrap();
 
         let score = detect_phase_transition(&g);
         assert!(!score.is_critical());
@@ -129,7 +129,7 @@ mod tests {
         for from in &names {
             for to in &names {
                 if from != to {
-                    g.add_dependency(from, to);
+                    g.add_dependency(from, to).unwrap();
                 }
             }
         }

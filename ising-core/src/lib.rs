@@ -6,5 +6,8 @@
 //! to detect when a codebase is approaching a "phase transition" from an
 //! ordered, modular state to a chaotic, unmaintainable one.
 
+pub mod error;
 pub mod graph;
 pub mod physics;
+
+pub use error::IsingError;

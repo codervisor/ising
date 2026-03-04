@@ -3,6 +3,7 @@
 //! Maps source symbols to a directed graph G = (V, E) where nodes are "spins"
 //! representing code symbols and edges represent dependencies between them.
 
+use crate::error::IsingError;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 
@@ -58,14 +59,21 @@ impl IsingGraph {
     }
 
     /// Add a directed edge (dependency) between two symbols by name.
-    /// Returns `true` if both symbols exist and the edge was added.
-    pub fn add_dependency(&mut self, from: &str, to: &str) -> bool {
-        if let (Some(&from_idx), Some(&to_idx)) = (self.index.get(from), self.index.get(to)) {
-            self.graph.add_edge(from_idx, to_idx, ());
-            true
-        } else {
-            false
-        }
+    ///
+    /// Returns `Err(IsingError::SymbolNotFound)` if either symbol does not exist.
+    pub fn add_dependency(&mut self, from: &str, to: &str) -> Result<(), IsingError> {
+        let from_idx = self
+            .index
+            .get(from)
+            .copied()
+            .ok_or_else(|| IsingError::SymbolNotFound(from.to_string()))?;
+        let to_idx = self
+            .index
+            .get(to)
+            .copied()
+            .ok_or_else(|| IsingError::SymbolNotFound(to.to_string()))?;
+        self.graph.add_edge(from_idx, to_idx, ());
+        Ok(())
     }
 
     /// Number of symbols (nodes) in the graph.
@@ -116,7 +124,7 @@ mod tests {
         let mut g = IsingGraph::new();
         g.add_symbol(make_symbol("a"));
         g.add_symbol(make_symbol("b"));
-        assert!(g.add_dependency("a", "b"));
+        assert!(g.add_dependency("a", "b").is_ok());
         assert_eq!(g.node_count(), 2);
         assert_eq!(g.edge_count(), 1);
     }
@@ -126,7 +134,7 @@ mod tests {
         let mut g = IsingGraph::new();
         g.add_symbol(make_symbol("a"));
         g.add_symbol(make_symbol("b"));
-        g.add_dependency("a", "b");
+        g.add_dependency("a", "b").unwrap();
 
         let m = g.to_adjacency_matrix();
         assert_eq!(m[[0, 1]], 1.0);

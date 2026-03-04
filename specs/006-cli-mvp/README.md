@@ -23,7 +23,7 @@ A local `ising` CLI binary that lets users analyze a codebase directly from the 
 
 - **Zero infrastructure**: No Docker install required. Single binary, works anywhere.
 - **Faster iteration**: Easier to build, test, and ship than container images.
-- **Lower barrier**: Users run `ising analyze .` in their repo and get results immediately.
+- **Lower barrier**: Users run `ising <path>` in their repo and get results immediately.
 - **Docker later**: Containers can wrap the CLI later for cloud/CI use cases — the CLI becomes the foundation either way.
 
 ## Design
@@ -32,21 +32,20 @@ A local `ising` CLI binary that lets users analyze a codebase directly from the 
 
 Add `ising-cli/` as a new workspace member. Depends on `ising-core` for graph construction and spectral analysis, and `ising-scip` (002) for SCIP index loading.
 
-### Subcommands
+### Usage
 
-    ising analyze <path>        # Analyze a codebase or .scip index
-    ising report <path>         # Generate a human-readable health report
-    ising --version             # Show version
-    ising --help                # Show help
+    ising <path> [--format json|text] [--output <file>]
+    ising --version
+    ising --help
 
-### `analyze` workflow
+### Workflow
 
 1. Accept a path: directory (codebase root) or `.scip` file.
 2. If directory: look for an existing `index.scip`, or instruct user to generate one.
 3. Load SCIP index via `ising-scip` (002).
 4. Build `IsingGraph` from symbols and references.
 5. Run spectral analysis (λ_max, modularity Q).
-6. Output JSON report to stdout.
+6. Output report to stdout.
 
 ### Output format
 
@@ -64,9 +63,7 @@ Add `ising-cli/` as a new workspace member. Depends on `ising-core` for graph co
       }
     }
 
-### `report` subcommand
-
-Same pipeline as `analyze`, but outputs a human-readable summary:
+### Text output format
 
     Ising Health Report
     ═══════════════════
@@ -87,15 +84,14 @@ Use `clap` (derive API) for argument parsing — idiomatic Rust, minimal deps.
 
 ### Output options
 
-- `--format json|text` flag (default: `json` for `analyze`, `text` for `report`)
+- `--format json|text` flag (default: `json`)
 - `--output <file>` to write to file instead of stdout
 - Exit code: 0 = stable (λ < 1), 1 = critical (λ ≥ 1) — enables CI gating
 
 ## Plan
 
 - [ ] Create `ising-cli/` binary crate with clap scaffolding
-- [ ] Implement `analyze` subcommand (SCIP path → JSON output)
-- [ ] Implement `report` subcommand (human-readable output)
+- [ ] Implement `analyze` command (SCIP path → JSON/text output)
 - [ ] Wire up `ising-core` graph + physics pipeline
 - [ ] Add `--format` and `--output` flags
 - [ ] CI exit code based on λ_max threshold
@@ -103,10 +99,9 @@ Use `clap` (derive API) for argument parsing — idiomatic Rust, minimal deps.
 
 ## Test
 
-- [ ] `ising analyze index.scip` produces valid JSON with correct schema
-- [ ] `ising report index.scip` produces readable text output
+- [ ] `ising index.scip` produces valid JSON with correct schema
+- [ ] `ising index.scip --format text` produces readable text output
 - [ ] Exit code 0 when λ_max < 1, exit code 1 when λ_max ≥ 1
-- [ ] `--format json` works on `report`, `--format text` works on `analyze`
 - [ ] `--output report.json` writes to file
 - [ ] `--help` and `--version` work correctly
 
