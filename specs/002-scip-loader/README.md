@@ -51,15 +51,22 @@ New crate `ising-scip` in the workspace. Keeps indexing concerns separate from t
 | Interface, Trait, Protocol | Interface |
 | Everything else | Other(string) |
 
-### Processing pipeline
+### Processing pipeline (two-pass)
+
+The loader uses a two-pass approach because `IsingGraph::add_dependency()` requires both symbols to exist before an edge can be created. Since a reference in Document A may point to a symbol defined in Document B (not yet iterated), all definitions must be collected first.
+
+**Pass 1 — Collect definitions:**
 
 1. Read `.scip` file → deserialize into `scip::types::Index`.
 2. Iterate `index.documents` — each Document represents one file.
-3. For each Document, iterate `occurrences`:
-   - Definition occurrences (role = Definition) → `IsingGraph::add_symbol()`.
-   - Reference occurrences (role = Reference) → `IsingGraph::add_dependency(referencing_symbol, referenced_symbol)`.
-4. Symbol identification uses SCIP's fully-qualified symbol string as the `Symbol::name`.
-5. Cross-file references handled naturally since SCIP symbol identifiers are globally unique.
+3. For each Document, iterate `document.symbols` (SymbolInformation entries) and `occurrences` with role = Definition → call `IsingGraph::add_symbol()` for each.
+4. Symbol identification uses SCIP's fully-qualified symbol string as `Symbol::name`. If a symbol appears in both `document.symbols` and as a definition occurrence, deduplicate by symbol string.
+
+**Pass 2 — Resolve references:**
+
+5. Iterate all documents and occurrences again.
+6. For each occurrence with role = Reference → call `IsingGraph::add_dependency(referencing_symbol, referenced_symbol)`.
+7. References to symbols not found in the graph (e.g., external/stdlib symbols not defined in the index) are silently skipped rather than producing errors. This is expected — SCIP indexes only the project under analysis, but references may point to dependencies.
 
 ### Error handling
 
@@ -79,7 +86,7 @@ New crate `ising-scip` in the workspace. Keeps indexing concerns separate from t
 - [ ] Add `scip` crate dependency, verify protobuf types compile
 - [ ] Implement `ScipLoader::load_from_file` and `load_from_index`
 - [ ] Implement symbol kind mapping (SCIP → SymbolKind)
-- [ ] Implement occurrence processing (definitions → nodes, references → edges)
+- [ ] Implement two-pass occurrence processing (pass 1: definitions → nodes, pass 2: references → edges)
 - [ ] Add `ScipError` error type
 - [ ] Integration tests with sample `.scip` files
 
@@ -88,6 +95,7 @@ New crate `ising-scip` in the workspace. Keeps indexing concerns separate from t
 - [ ] Parse a minimal `.scip` file with 2 symbols and 1 reference
 - [ ] Cross-file reference creates correct directed edge
 - [ ] Unknown/malformed symbol references produce `ScipError::InvalidData`
+- [ ] Reference to external symbol (not in index) is silently skipped
 - [ ] SCIP symbol kinds map correctly to `SymbolKind`
 - [ ] Empty `.scip` file returns empty IsingGraph
 - [ ] Round-trip: generate `.scip` with `rust-analyzer scip .` on a sample crate, load, verify node/edge counts
@@ -97,3 +105,4 @@ New crate `ising-scip` in the workspace. Keeps indexing concerns separate from t
 - **Which crate?** → `scip` v0.6.x from crates.io (confirmed available).
 - **Separate crate or module?** → Separate `ising-scip` crate to keep `ising-core` dependency-light.
 - **Incremental loading?** → Deferred. V1 loads full `.scip` file. Can add streaming later if perf requires it.
+- **One-pass or two-pass?** → Two-pass. `IsingGraph::add_dependency()` requires both endpoints to exist, so all definitions must be registered before references are resolved.
