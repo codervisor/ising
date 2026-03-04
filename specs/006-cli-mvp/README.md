@@ -23,7 +23,7 @@ A local `ising` CLI binary that lets users analyze a codebase directly from the 
 
 - **Zero infrastructure**: No Docker install required. Single binary, works anywhere.
 - **Faster iteration**: Easier to build, test, and ship than container images.
-- **Lower barrier**: Users run `ising <path>` in their repo and get results immediately.
+- **Lower barrier**: Users run `ising analyze <path>` in their repo and get results immediately.
 - **Docker later**: Containers can wrap the CLI later for cloud/CI use cases — the CLI becomes the foundation either way.
 
 ## Design
@@ -34,11 +34,13 @@ Add `ising-cli/` as a new workspace member. Depends on `ising-core` for graph co
 
 ### Usage
 
-    ising <path> [--format json|text] [--output <file>]
+    ising analyze <path> [--format json|text] [--output <file>]
     ising --version
     ising --help
 
-### Workflow
+Subcommands are used so the CLI can grow (e.g., `ising diff`, `ising watch`) without breaking existing usage. `analyze` is the first and primary subcommand.
+
+### Workflow (`analyze` subcommand)
 
 1. Accept a path: directory (codebase root) or `.scip` file.
 2. If directory: look for an existing `index.scip`, or instruct user to generate one.
@@ -90,8 +92,8 @@ Use `clap` (derive API) for argument parsing — idiomatic Rust, minimal deps.
 
 ## Plan
 
-- [ ] Create `ising-cli/` binary crate with clap scaffolding
-- [ ] Implement `analyze` command (SCIP path → JSON/text output)
+- [ ] Create `ising-cli/` binary crate with clap subcommand scaffolding
+- [ ] Implement `analyze` subcommand (SCIP path → JSON/text output)
 - [ ] Wire up `ising-core` graph + physics pipeline
 - [ ] Add `--format` and `--output` flags
 - [ ] CI exit code based on λ_max threshold
@@ -99,11 +101,12 @@ Use `clap` (derive API) for argument parsing — idiomatic Rust, minimal deps.
 
 ## Test
 
-- [ ] `ising index.scip` produces valid JSON with correct schema
-- [ ] `ising index.scip --format text` produces readable text output
+- [ ] `ising analyze index.scip` produces valid JSON with correct schema
+- [ ] `ising analyze index.scip --format text` produces readable text output
 - [ ] Exit code 0 when λ_max < 1, exit code 1 when λ_max ≥ 1
-- [ ] `--output report.json` writes to file
+- [ ] `ising analyze --output report.json index.scip` writes to file
 - [ ] `--help` and `--version` work correctly
+- [ ] `ising analyze --help` shows subcommand-specific help
 
 ## Notes
 

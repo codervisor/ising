@@ -1,0 +1,15 @@
+[package]
+name = "ising-scip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SCIP index loader for Ising graphs"
+
+[dependencies]
+ising-core = { path = "../ising-core" }
+scip.workspace = true
+protobuf.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

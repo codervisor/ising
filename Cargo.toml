@@ -1,5 +1,5 @@
 [workspace]
-members = ["ising-core"]
+members = ["ising-core", "ising-scip"]
 resolver = "2"
 
 [workspace.package]
@@ -14,3 +14,5 @@ rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+scip = "0.6"
+protobuf = "3"

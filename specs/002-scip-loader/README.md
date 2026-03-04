@@ -1,5 +1,5 @@
 ---
-status: planned
+status: complete
 created: 2026-03-04
 priority: high
 tags:
@@ -9,8 +9,15 @@ depends_on:
 - 001-rust-core
 - 005-lsp-vs-scip-research
 created_at: 2026-03-04T01:48:38.439719280Z
-updated_at: 2026-03-04T03:03:55.077914015Z
+updated_at: 2026-03-04T05:39:37.945966869Z
+completed_at: 2026-03-04T05:39:37.945966869Z
+transitions:
+- status: in-progress
+  at: 2026-03-04T05:35:21.353863688Z
+- status: complete
+  at: 2026-03-04T05:39:37.945966869Z
 ---
+
 # SCIP Loader — Index Integration
 
 ## Overview
@@ -82,23 +89,23 @@ The loader uses a two-pass approach because `IsingGraph::add_dependency()` requi
 
 ## Plan
 
-- [ ] Create `ising-scip` crate in workspace
-- [ ] Add `scip` crate dependency, verify protobuf types compile
-- [ ] Implement `ScipLoader::load_from_file` and `load_from_index`
-- [ ] Implement symbol kind mapping (SCIP → SymbolKind)
-- [ ] Implement two-pass occurrence processing (pass 1: definitions → nodes, pass 2: references → edges)
-- [ ] Add `ScipError` error type
-- [ ] Integration tests with sample `.scip` files
+- [x] Create `ising-scip` crate in workspace
+- [x] Add `scip` crate dependency, verify protobuf types compile
+- [x] Implement `ScipLoader::load_from_file` and `load_from_index`
+- [x] Implement symbol kind mapping (SCIP → SymbolKind)
+- [x] Implement two-pass occurrence processing (pass 1: definitions → nodes, pass 2: references → edges)
+- [x] Add `ScipError` error type
+- [x] Integration tests with sample `.scip` files
 
 ## Test
 
-- [ ] Parse a minimal `.scip` file with 2 symbols and 1 reference
-- [ ] Cross-file reference creates correct directed edge
-- [ ] Unknown/malformed symbol references produce `ScipError::InvalidData`
-- [ ] Reference to external symbol (not in index) is silently skipped
-- [ ] SCIP symbol kinds map correctly to `SymbolKind`
-- [ ] Empty `.scip` file returns empty IsingGraph
-- [ ] Round-trip: generate `.scip` with `rust-analyzer scip .` on a sample crate, load, verify node/edge counts
+- [x] Parse a minimal `.scip` file with 2 symbols and 1 reference
+- [x] Cross-file reference creates correct directed edge
+- [x] Unknown/malformed symbol references produce `ScipError::InvalidData`
+- [x] Reference to external symbol (not in index) is silently skipped
+- [x] SCIP symbol kinds map correctly to `SymbolKind`
+- [x] Empty `.scip` file returns empty IsingGraph
+- [x] Round-trip: generate `.scip` with `rust-analyzer scip .` on a sample crate, load, verify node/edge counts
 
 ## Open Questions (resolved)
 
@@ -106,3 +113,5 @@ The loader uses a two-pass approach because `IsingGraph::add_dependency()` requi
 - **Separate crate or module?** → Separate `ising-scip` crate to keep `ising-core` dependency-light.
 - **Incremental loading?** → Deferred. V1 loads full `.scip` file. Can add streaming later if perf requires it.
 - **One-pass or two-pass?** → Two-pass. `IsingGraph::add_dependency()` requires both endpoints to exist, so all definitions must be registered before references are resolved.
+
+- **Implementation note:** `rust-analyzer scip` was unavailable in this environment, so round-trip coverage uses protobuf serialization/deserialization of a synthetic `Index` fixture instead.
