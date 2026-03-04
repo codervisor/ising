@@ -7,8 +7,9 @@ tags:
 - cloud
 depends_on:
 - 002-scip-loader
+- 005-lsp-vs-scip-research
 created_at: 2026-03-04T01:48:38.439898044Z
-updated_at: 2026-03-04T01:48:43.096008720Z
+updated_at: 2026-03-04T03:03:55.087194138Z
 ---
 
 # Containerized Workers — Cloud Analysis

@@ -7,8 +7,9 @@ tags:
 - indexing
 depends_on:
 - 001-rust-core
+- 005-lsp-vs-scip-research
 created_at: 2026-03-04T01:48:38.439719280Z
-updated_at: 2026-03-04T01:48:43.095703990Z
+updated_at: 2026-03-04T03:03:55.077914015Z
 ---
 
 # SCIP Loader — Index Integration

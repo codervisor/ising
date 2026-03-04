@@ -6,16 +6,18 @@ Let’s re-bootstrap the **Ising** project with a high-octane English Design Doc
 
 # 🌀 Ising: The Physics of Code Complexity
 
-**Phase-Transition Analysis for Software Architectures**
+**Maintainability Analysis for Growing Software Projects**
 
 ## 1. Project Manifesto
 
-Software systems are not static; they are evolving dynamical systems. Most tools treat code like a collection of lines, but **Ising** treats it like a physical lattice. By applying **Statistical Physics** (the Ising Model) and **Spectral Graph Theory**, we detect when a codebase is about to undergo a "Phase Transition" from an ordered, modular state to a chaotic, unmaintainable mess.
+Software systems are not static; they are evolving dynamical systems. As projects grow, maintaining code quality and architectural health becomes exponentially harder. Most tools treat code like a collection of lines, but **Ising** treats it like a physical lattice. By applying **Statistical Physics** (the Ising Model) and **Spectral Graph Theory**, we help teams ensure the long-term maintainability of their codebases and surface concrete code quality improvements before technical debt compounds.
 
 ### Core Objectives
 
-* **Predict Criticality**: Identify the "tipping point" where a single change triggers a global collapse.
-* **Quantify Stability**: Use the Spectral Gap and Maximum Eigenvalue ($\lambda_{max}$) to measure architectural health.
+* **Ensure Maintainability**: Continuously monitor architectural health as projects grow, catching structural decay early.
+* **Identify Code Quality Improvements**: Surface tightly-coupled modules, fragile hotspots, and modularity violations that teams can act on.
+* **Predict Criticality**: Detect the "tipping point" where small changes risk cascading across the system.
+* **Quantify Stability**: Use the Spectral Gap and Maximum Eigenvalue ($\lambda_{max}$) to give teams a concrete health metric.
 * **Zero-Friction Analysis**: Provide a "one-click" cloud experience via Rust-powered containers and SCIP indexing.
 
 ---
@@ -89,7 +91,7 @@ The Docker image encapsulates the language-specific indexers (e.g., `scip-python
 
 ## 5. Why the name "Ising"?
 
-In the **Ising Model**, a system changes its state (like magnetism) based on local interactions. Similarly, in software, a "file-level" dependency might seem small, but thousands of them create a global "architecture phase." **Ising** is the first tool to bridge the gap between microscopic code changes and macroscopic architectural health.
+In the **Ising Model**, a system changes its state (like magnetism) based on local interactions. Similarly, in software, a "file-level" dependency might seem small, but thousands of them create a global "architecture phase." **Ising** bridges the gap between microscopic code changes and macroscopic architectural health — helping teams ensure maintainability of growing projects and identify concrete code quality improvements before technical debt becomes unmanageable.
 
 ---
 
