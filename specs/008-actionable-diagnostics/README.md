@@ -9,8 +9,9 @@ tags:
 depends_on:
 - 001-rust-core
 - 006-cli-mvp
+- 009-spectral-health-thesis
 created_at: 2026-03-04T07:46:00.558169334Z
-updated_at: 2026-03-04T07:46:00.558169334Z
+updated_at: 2026-03-04T07:59:57.540307181Z
 ---
 
 # Actionable Diagnostics — Explain Why & How to Fix
