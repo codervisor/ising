@@ -1,4 +1,38 @@
-# ising
+# Ising
+
+## 🧭 Project Context
+
+**Ising** is a maintainability analysis tool for growing software projects. It uses spectral graph theory and concepts from statistical physics (the Ising Model) to analyze code dependency graphs and surface actionable code quality improvements.
+
+### Positioning
+
+- **Goal**: Help teams ensure maintainability of growing codebases and identify concrete code quality improvements before technical debt compounds.
+- **Not**: An AI agent, a linter, or an IDE plugin. Ising is an analysis engine that quantifies architectural health.
+- **Mechanism**: SCIP-based code indexing → dependency graph construction → spectral analysis (λ_max, modularity Q) → health scoring.
+
+### Key Concepts
+
+| Concept | Meaning |
+|---|---|
+| **λ_max (spectral radius)** | Measures change propagation risk. λ < 1 = stable, λ > 1 = fragile. |
+| **Modularity Q** | Measures how well code separates into independent modules. Low Q = "Big Ball of Mud." |
+| **SCIP indexing** | Language-agnostic batch extraction of symbols and references from source code. |
+| **IsingGraph** | Our core graph model wrapping petgraph — symbols as nodes, dependencies as edges. |
+
+### Architecture
+
+- **`ising-core/`**: Rust crate with `graph` module (IsingGraph, Symbol types) and `physics` module (spectral analysis, health scoring).
+- **Build/Test**: `cargo build` and `cargo test` from workspace root.
+
+### Roadmap
+
+| Phase | Spec | Status |
+|---|---|---|
+| Spectral engine | 001-rust-core | in-progress |
+| SCIP index loading | 002-scip-loader | planned |
+| Containerized workers | 003-container-workers | planned |
+
+---
 
 ## 🚨 CRITICAL: Before ANY Task
 
@@ -98,6 +132,15 @@ Validation checks:
 - Excessive length (>400 lines)
 - Content/frontmatter dependency misalignment
 - Invalid frontmatter fields
+
+## 🎯 Implementation Guidelines
+
+When contributing code to Ising, keep these in mind:
+
+- **Maintainability is our product** — our own code must exemplify what we preach. Keep modules decoupled, APIs clean, and dependencies minimal.
+- **Portable builds** — avoid external C library dependencies (e.g., LAPACK). Pure Rust preferred.
+- **Workspace conventions** — shared deps in root `Cargo.toml` via `[workspace.dependencies]`. Crates inherit with `workspace = true`.
+- **Testing** — unit tests alongside modules. Integration tests for cross-module workflows (e.g., graph → physics pipeline).
 
 ## First Principles (Priority Order)
 
