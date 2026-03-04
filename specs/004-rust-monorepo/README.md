@@ -1,12 +1,16 @@
 ---
-status: in-progress
+status: complete
 created: 2026-03-04
 priority: medium
 tags:
 - infra
 - dx
 created_at: 2026-03-04T01:59:24.970706554Z
-updated_at: 2026-03-04T01:59:24.970706554Z
+updated_at: 2026-03-04T02:45:53.518794474Z
+completed_at: 2026-03-04T02:45:53.518794474Z
+transitions:
+- status: complete
+  at: 2026-03-04T02:45:53.518794474Z
 ---
 
 # Rust Monorepo — Workspace Configuration
@@ -23,12 +27,12 @@ Upgrade the Rust workspace from a minimal single-crate setup to a proper monorep
 
 ## Plan
 
-- [ ] Add `[workspace.package]` with shared metadata to root `Cargo.toml`
-- [ ] Add `[workspace.dependencies]` with all current deps to root `Cargo.toml`
-- [ ] Update `ising-core/Cargo.toml` to inherit from workspace
-- [ ] Verify build and tests pass
+- [x] Add `[workspace.package]` with shared metadata to root `Cargo.toml`
+- [x] Add `[workspace.dependencies]` with all current deps to root `Cargo.toml`
+- [x] Update `ising-core/Cargo.toml` to inherit from workspace
+- [x] Verify build and tests pass
 
 ## Test
 
-- [ ] `cargo build` succeeds
-- [ ] `cargo test` passes
+- [x] `cargo build` succeeds
+- [x] `cargo test` passes
