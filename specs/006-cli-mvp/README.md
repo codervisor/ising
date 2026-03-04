@@ -1,5 +1,5 @@
 ---
-status: planned
+status: complete
 created: 2026-03-04
 priority: high
 tags:
@@ -10,7 +10,13 @@ depends_on:
 - 001-rust-core
 - 002-scip-loader
 created_at: 2026-03-04T03:16:09.165977733Z
-updated_at: 2026-03-04T03:16:20.010069063Z
+updated_at: 2026-03-04T05:51:32.223060367Z
+completed_at: 2026-03-04T05:51:32.223060367Z
+transitions:
+- status: in-progress
+  at: 2026-03-04T05:48:36.627231839Z
+- status: complete
+  at: 2026-03-04T05:51:32.223060367Z
 ---
 
 # CLI MVP — Local Analysis Tool
@@ -92,23 +98,28 @@ Use `clap` (derive API) for argument parsing — idiomatic Rust, minimal deps.
 
 ## Plan
 
-- [ ] Create `ising-cli/` binary crate with clap subcommand scaffolding
-- [ ] Implement `analyze` subcommand (SCIP path → JSON/text output)
-- [ ] Wire up `ising-core` graph + physics pipeline
-- [ ] Add `--format` and `--output` flags
-- [ ] CI exit code based on λ_max threshold
-- [ ] Integration test: analyze a sample `.scip` index
+- [x] Create `ising-cli/` binary crate with clap subcommand scaffolding
+- [x] Implement `analyze` subcommand (SCIP path → JSON/text output)
+- [x] Wire up `ising-core` graph + physics pipeline
+- [x] Add `--format` and `--output` flags
+- [x] CI exit code based on λ_max threshold
+- [x] Integration test: analyze a sample `.scip` index
 
 ## Test
 
-- [ ] `ising analyze index.scip` produces valid JSON with correct schema
-- [ ] `ising analyze index.scip --format text` produces readable text output
-- [ ] Exit code 0 when λ_max < 1, exit code 1 when λ_max ≥ 1
-- [ ] `ising analyze --output report.json index.scip` writes to file
-- [ ] `--help` and `--version` work correctly
-- [ ] `ising analyze --help` shows subcommand-specific help
+- [x] `ising analyze index.scip` produces valid JSON with correct schema
+- [x] `ising analyze index.scip --format text` produces readable text output
+- [x] Exit code 0 when λ_max < 1, exit code 1 when λ_max ≥ 1
+- [x] `ising analyze --output report.json index.scip` writes to file
+- [x] `--help` and `--version` work correctly
+- [x] `ising analyze --help` shows subcommand-specific help
 
 ## Notes
 
 - This spec supersedes 003-container-workers as the MVP delivery path. Docker can later wrap this CLI for cloud/CI use.
 - Depends on 002-scip-loader for index parsing and 001-rust-core for the analysis engine.
+
+- Implemented as new `ising-cli` workspace member with binary name `ising`.
+- `analyze` accepts directory or `.scip` file input; directories require `index.scip`.
+- Added JSON/text output formatting, `--output` file writing, and CI-friendly exit codes (`0` stable, `1` critical).
+- Added CLI tests that generate temporary `.scip` fixtures and verify schema, text rendering, output writing, help/version, and exit code behavior.
