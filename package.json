@@ -8,6 +8,7 @@
     "test": "turbo run test",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "build:rust": "cargo build --release",
     "sync-versions": "tsx scripts/sync-versions.ts"
   },
   "devDependencies": {

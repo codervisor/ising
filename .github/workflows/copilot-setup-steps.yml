@@ -1,6 +1,7 @@
 name: "Copilot Setup Steps"
 
-on: repository_dispatch
+on:
+  repository_dispatch:
 
 jobs:
   copilot-setup-steps:
