@@ -24,6 +24,24 @@
 - **`ising-core/`**: Rust crate with `graph` module (IsingGraph, Symbol types) and `physics` module (spectral analysis, health scoring).
 - **Build/Test**: `cargo build` and `cargo test` from workspace root.
 
+## Skills
+
+This project uses [forge](https://github.com/codervisor/forge) skills:
+
+| Skill | Description |
+|-------|-------------|
+| `leanspec-sdd` | Spec-Driven Development — plan before you code |
+| `rust-npm-publish` | Distribute Rust binaries via npm platform packages |
+| `hybrid-ci` | CI/CD for Rust+Node.js with GitHub Actions |
+| `monorepo-version-sync` | Coordinated versioning across packages and languages |
+
+## Conventions
+
+- **Version source of truth**: Root `package.json` — never edit versions elsewhere directly
+- **Workspace protocol**: Use `workspace:*` for internal deps during development
+- **Specs first**: Create a spec before starting non-trivial work
+- **CI must pass**: All PRs require passing CI (Node + Rust checks)
+
 ### Roadmap
 
 | Phase | Spec | Status |
