@@ -8,13 +8,20 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, thiserror::Error)]
 enum CliError {
-    #[error("missing index.scip in directory `{0}`; generate one and retry")]
+    #[error("missing index.scip in directory `{0}`; generate one with `ising index`")]
     MissingIndex(String),
     #[error("invalid input path `{0}`")]
     InvalidInput(String),
+    #[error("could not detect project language in `{0}`; use --language to specify")]
+    UnknownLanguage(String),
+    #[error("indexer `{tool}` is not installed and auto-install failed: {reason}")]
+    InstallFailed { tool: String, reason: String },
+    #[error("indexer failed: {0}")]
+    IndexerFailed(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -32,7 +39,31 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Generate a SCIP index for a project (auto-installs indexer if needed)
+    Index(IndexArgs),
+    /// Analyze a project's maintainability from its SCIP index
     Analyze(AnalyzeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct IndexArgs {
+    /// Path to the project root (default: current directory)
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    /// Override language detection
+    #[arg(long, value_enum)]
+    language: Option<Language>,
+    /// Output path for the SCIP index file
+    #[arg(long, default_value = "index.scip")]
+    output: PathBuf,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum Language {
+    Rust,
+    Typescript,
+    Javascript,
+    Python,
 }
 
 #[derive(clap::Args, Debug)]
@@ -84,8 +115,170 @@ fn main() {
 
 fn run(cli: Cli) -> Result<i32, CliError> {
     match cli.command {
+        Commands::Index(args) => index(args),
         Commands::Analyze(args) => analyze(args),
     }
+}
+
+fn index(args: IndexArgs) -> Result<i32, CliError> {
+    let path = args.path.canonicalize().map_err(|_| {
+        CliError::InvalidInput(args.path.display().to_string())
+    })?;
+
+    let lang = match args.language {
+        Some(l) => l,
+        None => detect_language(&path)?,
+    };
+
+    ensure_indexer(lang)?;
+
+    eprintln!("Indexing {} project at {}...", lang.label(), path.display());
+    run_indexer(lang, &path, &args.output)?;
+
+    let output_path = path.join(&args.output);
+    let size = fs::metadata(&output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    eprintln!("Generated {} ({} bytes)", args.output.display(), size);
+    Ok(0)
+}
+
+impl Language {
+    fn label(self) -> &'static str {
+        match self {
+            Language::Rust => "Rust",
+            Language::Typescript => "TypeScript",
+            Language::Javascript => "JavaScript",
+            Language::Python => "Python",
+        }
+    }
+}
+
+fn detect_language(path: &Path) -> Result<Language, CliError> {
+    if path.join("Cargo.toml").is_file() {
+        return Ok(Language::Rust);
+    }
+    if path.join("tsconfig.json").is_file() {
+        return Ok(Language::Typescript);
+    }
+    if path.join("package.json").is_file() {
+        return Ok(Language::Javascript);
+    }
+    if path.join("pyproject.toml").is_file()
+        || path.join("setup.py").is_file()
+        || path.join("setup.cfg").is_file()
+    {
+        return Ok(Language::Python);
+    }
+    Err(CliError::UnknownLanguage(path.display().to_string()))
+}
+
+fn ensure_indexer(lang: Language) -> Result<(), CliError> {
+    match lang {
+        Language::Rust => ensure_rust_analyzer(),
+        Language::Typescript | Language::Javascript => ensure_npm_tool("scip-typescript", "@sourcegraph/scip-typescript"),
+        Language::Python => ensure_npm_tool("scip-python", "@sourcegraph/scip-python"),
+    }
+}
+
+fn ensure_rust_analyzer() -> Result<(), CliError> {
+    if command_exists("rust-analyzer") {
+        return Ok(());
+    }
+    eprintln!("rust-analyzer not found, installing via rustup...");
+    let status = Command::new("rustup")
+        .args(["component", "add", "rust-analyzer"])
+        .status()
+        .map_err(|e| CliError::InstallFailed {
+            tool: "rust-analyzer".into(),
+            reason: format!("failed to run rustup: {e}"),
+        })?;
+    if !status.success() {
+        return Err(CliError::InstallFailed {
+            tool: "rust-analyzer".into(),
+            reason: "rustup component add failed".into(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_npm_tool(bin_name: &str, package: &str) -> Result<(), CliError> {
+    if command_exists(bin_name) {
+        return Ok(());
+    }
+    eprintln!("{bin_name} not found, installing {package}...");
+    let status = Command::new("npm")
+        .args(["install", "-g", package])
+        .status()
+        .map_err(|e| CliError::InstallFailed {
+            tool: bin_name.into(),
+            reason: format!("failed to run npm: {e}"),
+        })?;
+    if !status.success() {
+        return Err(CliError::InstallFailed {
+            tool: bin_name.into(),
+            reason: format!("npm install -g {package} failed"),
+        });
+    }
+    Ok(())
+}
+
+fn command_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn run_indexer(lang: Language, project_dir: &Path, output: &Path) -> Result<(), CliError> {
+    let status = match lang {
+        Language::Rust => Command::new("rust-analyzer")
+            .args(["scip", ".", "--output"])
+            .arg(output)
+            .current_dir(project_dir)
+            .status(),
+        Language::Typescript => Command::new("scip-typescript")
+            .arg("index")
+            .current_dir(project_dir)
+            .status(),
+        Language::Javascript => Command::new("scip-typescript")
+            .args(["index", "--infer-tsconfig"])
+            .current_dir(project_dir)
+            .status(),
+        Language::Python => {
+            let project_name = project_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+            Command::new("scip-python")
+                .args(["index", ".", &format!("--project-name={project_name}")])
+                .current_dir(project_dir)
+                .status()
+        }
+    };
+
+    let status = status.map_err(|e| CliError::IndexerFailed(e.to_string()))?;
+    if !status.success() {
+        return Err(CliError::IndexerFailed(format!(
+            "{} indexer exited with {}",
+            lang.label(),
+            status
+        )));
+    }
+
+    // For TS/JS/Python, the indexer writes index.scip in the project dir.
+    // If a custom --output was given and differs, rename it.
+    if lang != Language::Rust {
+        let default_output = project_dir.join("index.scip");
+        let target = project_dir.join(output);
+        if default_output != target && default_output.is_file() {
+            fs::rename(&default_output, &target)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn analyze(args: AnalyzeArgs) -> Result<i32, CliError> {
