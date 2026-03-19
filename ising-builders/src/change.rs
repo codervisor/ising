@@ -166,33 +166,24 @@ fn get_changed_files(
                     if let Ok(path) = change.location().to_str() {
                         changed.insert(path.to_string());
                     }
-                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Cancel)
+                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
                 })?;
         }
         None => {
-            collect_tree_files(&tree, &mut changed)?;
+            // Root commit: diff empty tree → commit tree
+            let empty_tree = repo.empty_tree();
+            empty_tree
+                .changes()?
+                .for_each_to_obtain_tree(&tree, |change| {
+                    if let Ok(path) = change.location().to_str() {
+                        changed.insert(path.to_string());
+                    }
+                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
+                })?;
         }
     }
 
     Ok(changed)
-}
-
-/// Recursively collect all file paths from a tree object.
-fn collect_tree_files(
-    tree: &gix::Tree<'_>,
-    files: &mut std::collections::HashSet<String>,
-) -> Result<(), anyhow::Error> {
-    for entry_ref in tree.iter() {
-        let entry = entry_ref?;
-        let name = entry.filename().to_str().unwrap_or("").to_string();
-        match entry.mode().kind() {
-            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable => {
-                files.insert(name);
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// Create an ordered pair (for consistent HashMap keys).

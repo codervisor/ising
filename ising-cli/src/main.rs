@@ -29,6 +29,8 @@ enum Commands {
     Stats(StatsArgs),
     /// Export the graph in various formats
     Export(ExportArgs),
+    /// Start the MCP server for AI agent integration
+    Serve(ServeArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -114,9 +116,21 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(clap::Args, Debug)]
+struct ServeArgs {
+    /// Port to listen on
+    #[arg(long, default_value = "3000")]
+    port: u16,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 enum ExportFormat {
     Json,
+    Dot,
+    Mermaid,
 }
 
 fn main() {
@@ -148,6 +162,7 @@ fn run(cli: Cli) -> Result<i32> {
         Commands::Signals(args) => cmd_signals(args),
         Commands::Stats(args) => cmd_stats(args),
         Commands::Export(args) => cmd_export(args),
+        Commands::Serve(args) => cmd_serve(args),
     }
 }
 
@@ -368,13 +383,18 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
     let signals = db.get_signals(None, None)?;
     let hotspots = db.get_hotspots(100)?;
 
-    let export = serde_json::json!({
-        "stats": stats,
-        "signals": signals,
-        "hotspots": hotspots,
-    });
-
-    let output = serde_json::to_string_pretty(&export)?;
+    let output = match args.format {
+        ExportFormat::Json => {
+            let export = serde_json::json!({
+                "stats": stats,
+                "signals": signals,
+                "hotspots": hotspots,
+            });
+            serde_json::to_string_pretty(&export)?
+        }
+        ExportFormat::Dot => generate_dot(&db)?,
+        ExportFormat::Mermaid => generate_mermaid(&db)?,
+    };
 
     if let Some(path) = args.output {
         std::fs::write(&path, &output)?;
@@ -382,6 +402,116 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
     } else {
         println!("{output}");
     }
+
+    Ok(0)
+}
+
+fn generate_dot(db: &Database) -> Result<String> {
+    let mut out = String::from("digraph ising {\n  rankdir=LR;\n  node [shape=box];\n\n");
+
+    // Query edges from db
+    let signals = db.get_signals(None, None)?;
+    let hotspots = db.get_hotspots(50)?;
+
+    // Add hotspot nodes with color
+    for (id, score, _, _) in &hotspots {
+        let color = if *score > 0.7 {
+            "red"
+        } else if *score > 0.4 {
+            "orange"
+        } else {
+            "lightblue"
+        };
+        let label = id.replace('"', "\\\"");
+        out.push_str(&format!(
+            "  \"{}\" [label=\"{}\\n{:.2}\", style=filled, fillcolor={}];\n",
+            id, label, score, color
+        ));
+    }
+
+    // Add signal edges
+    for signal in &signals {
+        if let Some(node_b) = &signal.node_b {
+            let style = match signal.signal_type.as_str() {
+                "ghost_coupling" => "style=dashed, color=purple",
+                "fragile_boundary" => "style=bold, color=red",
+                "over_engineering" => "style=dotted, color=gray",
+                _ => "color=black",
+            };
+            out.push_str(&format!(
+                "  \"{}\" -> \"{}\" [{}, label=\"{}\"];\n",
+                signal.node_a, node_b, style, signal.signal_type
+            ));
+        }
+    }
+
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn generate_mermaid(db: &Database) -> Result<String> {
+    let mut out = String::from("graph LR\n");
+
+    let signals = db.get_signals(None, None)?;
+    let hotspots = db.get_hotspots(50)?;
+
+    // Add hotspot nodes
+    for (id, score, _, _) in &hotspots {
+        let safe_id = id.replace('/', "_").replace('.', "_").replace(':', "_");
+        let label = id.replace('"', "");
+        if *score > 0.7 {
+            out.push_str(&format!("  {safe_id}[\"{label}\\n🔥 {score:.2}\"]:::hot\n"));
+        } else {
+            out.push_str(&format!("  {safe_id}[\"{label}\\n{score:.2}\"]\n"));
+        }
+    }
+
+    // Add signal edges
+    for signal in &signals {
+        if let Some(node_b) = &signal.node_b {
+            let safe_a = signal
+                .node_a
+                .replace('/', "_")
+                .replace('.', "_")
+                .replace(':', "_");
+            let safe_b = node_b
+                .replace('/', "_")
+                .replace('.', "_")
+                .replace(':', "_");
+            let arrow = match signal.signal_type.as_str() {
+                "ghost_coupling" => "-.->",
+                "fragile_boundary" => "==>",
+                _ => "-->",
+            };
+            out.push_str(&format!(
+                "  {safe_a} {arrow}|{}| {safe_b}\n",
+                signal.signal_type
+            ));
+        }
+    }
+
+    out.push_str("  classDef hot fill:#f96,stroke:#333\n");
+    Ok(out)
+}
+
+fn cmd_serve(args: ServeArgs) -> Result<i32> {
+    let db_path = args.db.to_str().unwrap_or("ising.db").to_string();
+    let port = args.port;
+
+    eprintln!("Starting MCP server on port {port}...");
+    eprintln!("  Database: {db_path}");
+    eprintln!("  Endpoints:");
+    eprintln!("    GET /tools     - list available tools");
+    eprintln!("    GET /impact    - blast radius for a file");
+    eprintln!("    GET /signals   - risk signals");
+    eprintln!("    GET /health    - graph statistics");
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        ising_server::serve(&db_path, port)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    })?;
 
     Ok(0)
 }
@@ -438,5 +568,23 @@ mod tests {
     fn stats_command_parses() {
         let cli = Cli::try_parse_from(["ising", "stats"]).unwrap();
         assert!(matches!(cli.command, Commands::Stats(_)));
+    }
+
+    #[test]
+    fn serve_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "serve", "--port", "8080"]).unwrap();
+        assert!(matches!(cli.command, Commands::Serve(_)));
+    }
+
+    #[test]
+    fn export_dot_parses() {
+        let cli = Cli::try_parse_from(["ising", "export", "--format", "dot"]).unwrap();
+        assert!(matches!(cli.command, Commands::Export(_)));
+    }
+
+    #[test]
+    fn export_mermaid_parses() {
+        let cli = Cli::try_parse_from(["ising", "export", "--format", "mermaid"]).unwrap();
+        assert!(matches!(cli.command, Commands::Export(_)));
     }
 }
