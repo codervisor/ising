@@ -258,6 +258,11 @@ impl UnifiedGraph {
         self.index.get(id).map(|&idx| &self.graph[idx])
     }
 
+    /// Get a mutable reference to a node by ID.
+    pub fn get_node_mut(&mut self, id: &str) -> Option<&mut Node> {
+        self.index.get(id).map(|&idx| &mut self.graph[idx])
+    }
+
     /// Get the petgraph NodeIndex for a node ID.
     pub fn node_index(&self, id: &str) -> Option<NodeIndex> {
         self.index.get(id).copied()
