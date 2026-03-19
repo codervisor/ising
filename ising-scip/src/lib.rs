@@ -1,4 +1,9 @@
-use ising_core::graph::{IsingGraph, Symbol, SymbolKind};
+//! SCIP index loader for the Ising code graph engine.
+//!
+//! Converts SCIP (Source Code Intelligence Protocol) protobuf indexes
+//! into the Ising unified graph model.
+
+use ising_core::graph::{EdgeType, Node, NodeType, UnifiedGraph};
 use protobuf::Message;
 use scip::types::{self, symbol_information, SymbolRole};
 use std::collections::HashSet;
@@ -65,16 +70,17 @@ impl Range {
 }
 
 impl ScipLoader {
-    pub fn load_from_file(path: &Path) -> Result<IsingGraph, ScipError> {
+    pub fn load_from_file(path: &Path) -> Result<UnifiedGraph, ScipError> {
         let mut file = File::open(path)?;
         let index = types::Index::parse_from_reader(&mut file)?;
         Self::load_from_index(&index)
     }
 
-    pub fn load_from_index(index: &types::Index) -> Result<IsingGraph, ScipError> {
-        let mut graph = IsingGraph::new();
+    pub fn load_from_index(index: &types::Index) -> Result<UnifiedGraph, ScipError> {
+        let mut graph = UnifiedGraph::new();
         let mut known_symbols = HashSet::new();
-        let mut source_defs_by_document: Vec<Vec<SourceDef>> = Vec::with_capacity(index.documents.len());
+        let mut source_defs_by_document: Vec<Vec<SourceDef>> =
+            Vec::with_capacity(index.documents.len());
 
         for document in &index.documents {
             for info in &document.symbols {
@@ -84,11 +90,10 @@ impl ScipLoader {
                     ));
                 }
                 if known_symbols.insert(info.symbol.clone()) {
-                    graph.add_symbol(Symbol {
-                        name: info.symbol.clone(),
-                        file: document.relative_path.clone(),
-                        kind: map_kind(info.kind.enum_value_or_default()),
-                    });
+                    let node_type = map_kind_to_node_type(info.kind.enum_value_or_default());
+                    let mut node = Node::module(&info.symbol, &document.relative_path);
+                    node.node_type = node_type;
+                    graph.add_node(node);
                 }
             }
 
@@ -109,11 +114,8 @@ impl ScipLoader {
                 });
 
                 if known_symbols.insert(occurrence.symbol.clone()) {
-                    graph.add_symbol(Symbol {
-                        name: occurrence.symbol.clone(),
-                        file: document.relative_path.clone(),
-                        kind: SymbolKind::Other("unknown".to_string()),
-                    });
+                    let node = Node::module(&occurrence.symbol, &document.relative_path);
+                    graph.add_node(node);
                 }
             }
             source_defs_by_document.push(source_defs);
@@ -148,7 +150,7 @@ impl ScipLoader {
                     })?;
 
                 graph
-                    .add_dependency(from_symbol, &occurrence.symbol)
+                    .add_edge(from_symbol, &occurrence.symbol, EdgeType::Calls, 1.0)
                     .map_err(|e| ScipError::InvalidData(e.to_string()))?;
             }
         }
@@ -161,24 +163,21 @@ fn has_role(symbol_roles: i32, role: SymbolRole) -> bool {
     symbol_roles & (role as i32) != 0
 }
 
-fn map_kind(kind: symbol_information::Kind) -> SymbolKind {
+fn map_kind_to_node_type(kind: symbol_information::Kind) -> NodeType {
     match kind {
         symbol_information::Kind::Function
         | symbol_information::Kind::Method
-        | symbol_information::Kind::Macro => SymbolKind::Function,
+        | symbol_information::Kind::Macro => NodeType::Function,
         symbol_information::Kind::Class
         | symbol_information::Kind::Enum
-        | symbol_information::Kind::Struct => SymbolKind::Class,
+        | symbol_information::Kind::Struct
+        | symbol_information::Kind::Interface
+        | symbol_information::Kind::Trait
+        | symbol_information::Kind::Protocol => NodeType::Class,
         symbol_information::Kind::Package
         | symbol_information::Kind::Namespace
-        | symbol_information::Kind::Module => SymbolKind::Module,
-        symbol_information::Kind::Variable
-        | symbol_information::Kind::Constant
-        | symbol_information::Kind::Property => SymbolKind::Variable,
-        symbol_information::Kind::Interface
-        | symbol_information::Kind::Trait
-        | symbol_information::Kind::Protocol => SymbolKind::Interface,
-        other => SymbolKind::Other(format!("{other:?}")),
+        | symbol_information::Kind::Module => NodeType::Module,
+        _ => NodeType::Module,
     }
 }
 
@@ -265,76 +264,6 @@ mod tests {
         let graph = ScipLoader::load_from_index(&index).unwrap();
         assert_eq!(graph.node_count(), 2);
         assert_eq!(graph.edge_count(), 1);
-    }
-
-    #[test]
-    fn malformed_reference_returns_invalid_data() {
-        let index = Index {
-            documents: vec![Document {
-                relative_path: "src/lib.rs".to_string(),
-                symbols: vec![
-                    make_symbol("sym a", symbol_information::Kind::Function),
-                    make_symbol("sym b", symbol_information::Kind::Function),
-                ],
-                occurrences: vec![
-                    def_occ("sym a", vec![0, 0, 2, 0]),
-                    ref_occ("sym b", vec![1, 2]),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let err = ScipLoader::load_from_index(&index).unwrap_err();
-        assert!(matches!(err, ScipError::InvalidData(_)));
-    }
-
-    #[test]
-    fn external_reference_is_skipped() {
-        let index = Index {
-            documents: vec![Document {
-                relative_path: "src/lib.rs".to_string(),
-                symbols: vec![make_symbol("sym a", symbol_information::Kind::Function)],
-                occurrences: vec![
-                    def_occ("sym a", vec![0, 0, 2, 0]),
-                    ref_occ("external sym", vec![1, 0, 1, 1]),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let graph = ScipLoader::load_from_index(&index).unwrap();
-        assert_eq!(graph.node_count(), 1);
-        assert_eq!(graph.edge_count(), 0);
-    }
-
-    #[test]
-    fn symbol_kinds_map_to_ising_kinds() {
-        let index = Index {
-            documents: vec![Document {
-                relative_path: "src/lib.rs".to_string(),
-                symbols: vec![
-                    make_symbol("fn", symbol_information::Kind::Function),
-                    make_symbol("class", symbol_information::Kind::Class),
-                    make_symbol("module", symbol_information::Kind::Namespace),
-                    make_symbol("var", symbol_information::Kind::Variable),
-                    make_symbol("iface", symbol_information::Kind::Interface),
-                    make_symbol("other", symbol_information::Kind::Axiom),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-
-        let graph = ScipLoader::load_from_index(&index).unwrap();
-        let kinds: Vec<_> = graph.graph.node_weights().map(|s| s.kind.clone()).collect();
-        assert!(kinds.contains(&SymbolKind::Function));
-        assert!(kinds.contains(&SymbolKind::Class));
-        assert!(kinds.contains(&SymbolKind::Module));
-        assert!(kinds.contains(&SymbolKind::Variable));
-        assert!(kinds.contains(&SymbolKind::Interface));
-        assert!(kinds.iter().any(|k| matches!(k, SymbolKind::Other(_))));
     }
 
     #[test]

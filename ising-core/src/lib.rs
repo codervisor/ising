@@ -1,13 +1,18 @@
 //! # Ising Core
 //!
-//! Phase-transition analysis for software architectures.
+//! Core types and analysis for the Ising three-layer code graph engine.
 //!
-//! Applies Statistical Physics (the Ising Model) and Spectral Graph Theory
-//! to detect when a codebase is approaching a "phase transition" from an
-//! ordered, modular state to a chaotic, unmaintainable one.
+//! Provides the unified graph model that combines:
+//! - **Layer 1 — Structural Graph**: static dependencies from code (AST)
+//! - **Layer 2 — Change Graph**: temporal coupling from git history
+//! - **Layer 3 — Defect Graph**: fault propagation from issue tracker + git blame
+//!
+//! The key innovation is cross-layer signal detection: anomalies that only
+//! appear when comparing across layers.
 
+pub mod config;
 pub mod error;
 pub mod graph;
-pub mod physics;
+pub mod metrics;
 
 pub use error::IsingError;

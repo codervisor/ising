@@ -3,7 +3,7 @@ name = "ising-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI for local Ising maintainability analysis"
+description = "CLI for the Ising three-layer code graph analysis engine"
 
 [[bin]]
 name = "ising"
@@ -12,13 +12,16 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 ising-core = { path = "../ising-core" }
-ising-scip = { path = "../ising-scip" }
-petgraph.workspace = true
+ising-db = { path = "../ising-db" }
+ising-builders = { path = "../ising-builders" }
+ising-analysis = { path = "../ising-analysis" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
-protobuf.workspace = true
-scip.workspace = true
 tempfile = "3"
