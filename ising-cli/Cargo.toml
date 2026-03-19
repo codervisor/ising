@@ -15,6 +15,8 @@ ising-core = { path = "../ising-core" }
 ising-db = { path = "../ising-db" }
 ising-builders = { path = "../ising-builders" }
 ising-analysis = { path = "../ising-analysis" }
+ising-server = { path = "../ising-server" }
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
