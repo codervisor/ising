@@ -1,0 +1,12 @@
+[package]
+name = "ising-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-layer signal detection for the Ising code graph engine"
+
+[dependencies]
+ising-core = { path = "../ising-core" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

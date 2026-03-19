@@ -1,0 +1,34 @@
+# Ising Configuration
+# Three-Layer Code Graph Analysis Engine
+
+[build]
+# Git history time window for change analysis
+time_window = "6 months ago"
+# SQLite database file
+db_path = "ising.db"
+
+[thresholds]
+# Minimum co-change count before considering a file pair
+min_co_changes = 5
+# Minimum temporal coupling score to create an edge
+min_coupling = 0.3
+# Coupling threshold for ghost coupling signal (no structural dep)
+ghost_coupling_threshold = 0.5
+# Coupling threshold for fragile boundary signal
+fragile_boundary_coupling = 0.3
+# Fault propagation threshold for fragile boundary
+fragile_boundary_fault_prop = 0.1
+# Max coupling for over-engineering signal
+over_engineering_coupling = 0.05
+
+[percentiles]
+# Change frequency percentile for stable core (bottom N%)
+stable_core_freq = 10
+# Fan-in percentile for stable core (top N%)
+stable_core_fan_in = 80
+# Hotspot percentile for ticking bomb (top N%)
+ticking_bomb_hotspot = 90
+# Defect density percentile for ticking bomb (top N%)
+ticking_bomb_defect = 90
+# Coupling percentile for ticking bomb (top N%)
+ticking_bomb_coupling = 80

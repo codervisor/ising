@@ -1,36 +1,14 @@
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use ising_core::graph::IsingGraph;
-use ising_core::physics::detect_phase_transition;
-use ising_scip::ScipLoader;
-use petgraph::unionfind::UnionFind;
-use petgraph::visit::EdgeRef;
-use serde::Serialize;
-use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-#[derive(Debug, thiserror::Error)]
-enum CliError {
-    #[error("missing index.scip in directory `{0}`; generate one with `ising index`")]
-    MissingIndex(String),
-    #[error("invalid input path `{0}`")]
-    InvalidInput(String),
-    #[error("could not detect project language in `{0}`; use --language to specify")]
-    UnknownLanguage(String),
-    #[error("indexer `{tool}` is not installed and auto-install failed: {reason}")]
-    InstallFailed { tool: String, reason: String },
-    #[error("indexer failed: {0}")]
-    IndexerFailed(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Scip(#[from] ising_scip::ScipError),
-}
+use ising_analysis::signals::detect_signals;
+use ising_core::config::Config;
+use ising_core::metrics::compute_graph_metrics;
+use ising_db::Database;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "ising")]
-#[command(about = "Maintainability analysis for software projects")]
+#[command(about = "Three-layer code graph analysis engine")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -39,555 +17,426 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Generate a SCIP index for a project (auto-installs indexer if needed)
-    Index(IndexArgs),
-    /// Analyze a project's maintainability from its SCIP index
-    Analyze(AnalyzeArgs),
+    /// Build the code graph: parse code + analyze git history + detect signals
+    Build(BuildArgs),
+    /// Show blast radius, dependencies, and risk signals for a file
+    Impact(ImpactArgs),
+    /// Show top hotspots ranked by change frequency × complexity
+    Hotspots(HotspotsArgs),
+    /// Show detected cross-layer signals
+    Signals(SignalsArgs),
+    /// Show global graph statistics
+    Stats(StatsArgs),
+    /// Export the graph in various formats
+    Export(ExportArgs),
 }
 
 #[derive(clap::Args, Debug)]
-struct IndexArgs {
-    /// Path to the project root (default: current directory)
-    #[arg(default_value = ".")]
-    path: PathBuf,
-    /// Override language detection
-    #[arg(long, value_enum)]
-    language: Option<Language>,
-    /// Output path for the SCIP index file
-    #[arg(long, default_value = "index.scip")]
-    output: PathBuf,
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
-enum Language {
-    Rust,
-    Typescript,
-    Javascript,
-    Python,
+struct BuildArgs {
+    /// Path to the repository root
+    #[arg(long, default_value = ".")]
+    repo_path: PathBuf,
+    /// Git history time window (e.g., "6 months ago")
+    #[arg(long)]
+    since: Option<String>,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Config file path
+    #[arg(long, default_value = "ising.toml")]
+    config: PathBuf,
 }
 
 #[derive(clap::Args, Debug)]
-struct AnalyzeArgs {
-    path: PathBuf,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+struct ImpactArgs {
+    /// File path or qualified function name to analyze
+    target: String,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct HotspotsArgs {
+    /// Number of top hotspots to show
+    #[arg(long, default_value = "20")]
+    top: usize,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
+}
+
+#[derive(clap::Args, Debug)]
+struct SignalsArgs {
+    /// Filter by signal type
+    #[arg(long, rename_all = "snake_case")]
+    r#type: Option<String>,
+    /// Minimum severity threshold
+    #[arg(long)]
+    min_severity: Option<f64>,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(clap::Args, Debug)]
+struct StatsArgs {
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(clap::Args, Debug)]
+struct ExportArgs {
+    /// Export format
+    #[arg(long, value_enum)]
+    format: ExportFormat,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Output file (stdout if not specified)
     #[arg(long)]
     output: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 enum OutputFormat {
-    Json,
     Text,
+    Json,
 }
 
-#[derive(Debug, Serialize)]
-struct AnalyzeReport {
-    version: String,
-    path: String,
-    health: HealthReport,
-    summary: SummaryReport,
-}
-
-#[derive(Debug, Serialize)]
-struct HealthReport {
-    lambda_max: f64,
-    status: String,
-    modularity_q: f64,
-}
-
-#[derive(Debug, Serialize)]
-struct SummaryReport {
-    symbols: usize,
-    dependencies: usize,
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum ExportFormat {
+    Json,
 }
 
 fn main() {
-    let exit_code = match run(Cli::parse()) {
+    let cli = Cli::parse();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let exit_code = match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err}");
+            eprintln!("error: {err:#}");
             2
         }
     };
     std::process::exit(exit_code);
 }
 
-fn run(cli: Cli) -> Result<i32, CliError> {
+fn run(cli: Cli) -> Result<i32> {
     match cli.command {
-        Commands::Index(args) => index(args),
-        Commands::Analyze(args) => analyze(args),
+        Commands::Build(args) => cmd_build(args),
+        Commands::Impact(args) => cmd_impact(args),
+        Commands::Hotspots(args) => cmd_hotspots(args),
+        Commands::Signals(args) => cmd_signals(args),
+        Commands::Stats(args) => cmd_stats(args),
+        Commands::Export(args) => cmd_export(args),
     }
 }
 
-fn index(args: IndexArgs) -> Result<i32, CliError> {
-    let path = args.path.canonicalize().map_err(|_| {
-        CliError::InvalidInput(args.path.display().to_string())
-    })?;
+fn cmd_build(args: BuildArgs) -> Result<i32> {
+    let mut config = Config::load_or_default(&args.config);
 
-    let lang = match args.language {
-        Some(l) => l,
-        None => detect_language(&path)?,
-    };
+    if let Some(since) = args.since {
+        config.build.time_window = since;
+    }
 
-    ensure_indexer(lang)?;
+    let repo_path = args.repo_path.canonicalize()?;
+    eprintln!("Building graph for {}...", repo_path.display());
 
-    eprintln!("Indexing {} project at {}...", lang.label(), path.display());
-    run_indexer(lang, &path, &args.output)?;
+    // Build the multi-layer graph
+    let graph = ising_builders::build_all(&repo_path, &config)?;
 
-    let output_path = path.join(&args.output);
-    let size = fs::metadata(&output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    eprintln!("Generated {} ({} bytes)", args.output.display(), size);
+    // Detect cross-layer signals
+    let signals = detect_signals(&graph, &config);
+
+    // Compute graph metrics
+    let metrics = compute_graph_metrics(&graph);
+
+    // Store to database
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+    db.clear()?;
+    db.store_graph(&graph)?;
+
+    // Store signals
+    for signal in &signals {
+        let details = serde_json::to_value(&signal)?;
+        db.store_signal(
+            &serde_json::to_value(&signal.signal_type)?
+                .as_str()
+                .unwrap_or("unknown"),
+            &signal.node_a,
+            signal.node_b.as_deref(),
+            signal.severity,
+            Some(&details),
+        )?;
+    }
+
+    // Store build metadata
+    let now = chrono::Utc::now().to_rfc3339();
+    db.set_build_info("last_build", &now)?;
+    db.set_build_info("repo_path", &repo_path.display().to_string())?;
+    db.set_build_info("time_window", &config.build.time_window)?;
+
+    // Summary output
+    eprintln!();
+    eprintln!("Build complete:");
+    eprintln!("  Nodes:            {}", metrics.total_nodes);
+    eprintln!("  Structural edges: {}", metrics.structural_edges);
+    eprintln!("  Change edges:     {}", metrics.change_edges);
+    eprintln!("  Defect edges:     {}", metrics.defect_edges);
+    eprintln!("  Cycles:           {}", metrics.cycle_count);
+    eprintln!("  Signals:          {}", signals.len());
+
+    if !signals.is_empty() {
+        eprintln!();
+        eprintln!("Top signals:");
+        for signal in signals.iter().take(5) {
+            let priority = signal.signal_type.priority().to_uppercase();
+            let target = match &signal.node_b {
+                Some(b) => format!("{} <-> {}", signal.node_a, b),
+                None => signal.node_a.clone(),
+            };
+            eprintln!("  [{priority}] {:?}: {target}", signal.signal_type);
+        }
+    }
+
     Ok(0)
 }
 
-impl Language {
-    fn label(self) -> &'static str {
-        match self {
-            Language::Rust => "Rust",
-            Language::Typescript => "TypeScript",
-            Language::Javascript => "JavaScript",
-            Language::Python => "Python",
-        }
-    }
-}
+fn cmd_impact(args: ImpactArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+    let impact = db.get_impact(&args.target)?;
 
-fn detect_language(path: &Path) -> Result<Language, CliError> {
-    if path.join("Cargo.toml").is_file() {
-        return Ok(Language::Rust);
-    }
-    if path.join("tsconfig.json").is_file() {
-        return Ok(Language::Typescript);
-    }
-    if path.join("package.json").is_file() {
-        return Ok(Language::Javascript);
-    }
-    if path.join("pyproject.toml").is_file()
-        || path.join("setup.py").is_file()
-        || path.join("setup.cfg").is_file()
+    if impact.structural_deps.is_empty()
+        && impact.temporal_coupling.is_empty()
+        && impact.signals.is_empty()
     {
-        return Ok(Language::Python);
+        eprintln!("No data found for '{}'", args.target);
+        return Ok(1);
     }
-    Err(CliError::UnknownLanguage(path.display().to_string()))
-}
 
-fn ensure_indexer(lang: Language) -> Result<(), CliError> {
-    match lang {
-        Language::Rust => ensure_rust_analyzer(),
-        Language::Typescript | Language::Javascript => ensure_npm_tool("scip-typescript", "@sourcegraph/scip-typescript"),
-        Language::Python => ensure_npm_tool("scip-python", "@sourcegraph/scip-python"),
-    }
-}
+    println!("Impact: {}", args.target);
+    println!("{}", "═".repeat(40));
 
-fn ensure_rust_analyzer() -> Result<(), CliError> {
-    if command_exists("rust-analyzer") {
-        return Ok(());
+    if let Some(cm) = &impact.change_metrics {
+        println!(
+            "  Change Freq: {} | Hotspot: {:.2} | Churn Rate: {:.2}",
+            cm.change_freq, cm.hotspot_score, cm.churn_rate
+        );
+        println!();
     }
-    eprintln!("rust-analyzer not found, installing via rustup...");
-    let status = Command::new("rustup")
-        .args(["component", "add", "rust-analyzer"])
-        .status()
-        .map_err(|e| CliError::InstallFailed {
-            tool: "rust-analyzer".into(),
-            reason: format!("failed to run rustup: {e}"),
-        })?;
-    if !status.success() {
-        return Err(CliError::InstallFailed {
-            tool: "rust-analyzer".into(),
-            reason: "rustup component add failed".into(),
-        });
-    }
-    Ok(())
-}
 
-fn ensure_npm_tool(bin_name: &str, package: &str) -> Result<(), CliError> {
-    if command_exists(bin_name) {
-        return Ok(());
-    }
-    eprintln!("{bin_name} not found, installing {package}...");
-    let status = Command::new("npm")
-        .args(["install", "-g", package])
-        .status()
-        .map_err(|e| CliError::InstallFailed {
-            tool: bin_name.into(),
-            reason: format!("failed to run npm: {e}"),
-        })?;
-    if !status.success() {
-        return Err(CliError::InstallFailed {
-            tool: bin_name.into(),
-            reason: format!("npm install -g {package} failed"),
-        });
-    }
-    Ok(())
-}
-
-fn command_exists(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-fn run_indexer(lang: Language, project_dir: &Path, output: &Path) -> Result<(), CliError> {
-    let status = match lang {
-        Language::Rust => Command::new("rust-analyzer")
-            .args(["scip", ".", "--output"])
-            .arg(output)
-            .current_dir(project_dir)
-            .status(),
-        Language::Typescript => Command::new("scip-typescript")
-            .arg("index")
-            .current_dir(project_dir)
-            .status(),
-        Language::Javascript => Command::new("scip-typescript")
-            .args(["index", "--infer-tsconfig"])
-            .current_dir(project_dir)
-            .status(),
-        Language::Python => {
-            let project_name = project_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project");
-            Command::new("scip-python")
-                .args(["index", ".", &format!("--project-name={project_name}")])
-                .current_dir(project_dir)
-                .status()
+    if !impact.structural_deps.is_empty() {
+        println!("Structural Dependencies (fan-out: {}):", impact.structural_deps.len());
+        for (target, edge_type, _weight) in &impact.structural_deps {
+            println!("  -> {target}  ({edge_type})");
         }
-    };
-
-    let status = status.map_err(|e| CliError::IndexerFailed(e.to_string()))?;
-    if !status.success() {
-        return Err(CliError::IndexerFailed(format!(
-            "{} indexer exited with {}",
-            lang.label(),
-            status
-        )));
+        println!();
     }
 
-    // For TS/JS/Python, the indexer writes index.scip in the project dir.
-    // If a custom --output was given and differs, rename it.
-    if lang != Language::Rust {
-        let default_output = project_dir.join("index.scip");
-        let target = project_dir.join(output);
-        if default_output != target && default_output.is_file() {
-            fs::rename(&default_output, &target)?;
+    if !impact.temporal_coupling.is_empty() {
+        println!("Temporal Coupling (co-change > threshold):");
+        for (target, coupling) in &impact.temporal_coupling {
+            println!("  <-> {target}  coupling: {coupling:.2}");
+        }
+        println!();
+    }
+
+    if !impact.signals.is_empty() {
+        println!("Signals:");
+        for signal in &impact.signals {
+            let node_b = signal
+                .node_b
+                .as_deref()
+                .map(|b| format!(" <-> {b}"))
+                .unwrap_or_default();
+            println!(
+                "  [{:.2}] {}{node_b}",
+                signal.severity, signal.signal_type
+            );
         }
     }
 
-    Ok(())
+    Ok(0)
 }
 
-fn analyze(args: AnalyzeArgs) -> Result<i32, CliError> {
-    let (scip_path, report_path) = resolve_input_path(&args.path)?;
-    let graph = ScipLoader::load_from_file(&scip_path)?;
-    let lambda = detect_phase_transition(&graph).lambda();
-    let modularity_q = estimate_modularity_q(&graph);
+fn cmd_hotspots(args: HotspotsArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+    let hotspots = db.get_hotspots(args.top)?;
 
-    let report = AnalyzeReport {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        path: report_path,
-        health: HealthReport {
-            lambda_max: lambda,
-            status: status_from_lambda(lambda).to_string(),
-            modularity_q,
-        },
-        summary: SummaryReport {
-            symbols: graph.node_count(),
-            dependencies: graph.edge_count(),
-        },
-    };
+    match args.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&hotspots)?);
+        }
+        OutputFormat::Text => {
+            println!("Top {} Hotspots", args.top);
+            println!("{}", "═".repeat(60));
+            for (rank, (id, score, complexity, freq)) in hotspots.iter().enumerate() {
+                println!(
+                    "  {:>2}. {:<40} score: {:.2}  freq: {:.0}  complexity: {}",
+                    rank + 1,
+                    id,
+                    score,
+                    freq,
+                    complexity
+                );
+            }
+        }
+    }
 
-    let rendered = match args.format {
-        OutputFormat::Json => serde_json::to_string_pretty(&report).expect("serializable report"),
-        OutputFormat::Text => format_text_report(&report, &graph),
-    };
+    Ok(0)
+}
+
+fn cmd_signals(args: SignalsArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+    let signals = db.get_signals(args.r#type.as_deref(), args.min_severity)?;
+
+    match args.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&signals)?);
+        }
+        OutputFormat::Text => {
+            println!("Signals ({} found)", signals.len());
+            println!("{}", "═".repeat(60));
+            for signal in &signals {
+                let node_b = signal
+                    .node_b
+                    .as_deref()
+                    .map(|b| format!(" <-> {b}"))
+                    .unwrap_or_default();
+                println!(
+                    "  [{:.2}] {}: {}{}",
+                    signal.severity, signal.signal_type, signal.node_a, node_b
+                );
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+fn cmd_stats(args: StatsArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+    let stats = db.get_stats()?;
+
+    match args.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        }
+        OutputFormat::Text => {
+            println!("Ising Graph Statistics");
+            println!("{}", "═".repeat(30));
+            println!("  Nodes:            {}", stats.node_count);
+            println!("  Total edges:      {}", stats.edge_count);
+            println!("  Structural edges: {}", stats.structural_edges);
+            println!("  Change edges:     {}", stats.change_edges);
+            println!("  Signals:          {}", stats.signal_count);
+
+            if let Ok(Some(last_build)) = db.get_build_info("last_build") {
+                println!("  Last build:       {last_build}");
+            }
+            if let Ok(Some(repo_path)) = db.get_build_info("repo_path") {
+                println!("  Repository:       {repo_path}");
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+fn cmd_export(args: ExportArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+    let stats = db.get_stats()?;
+    let signals = db.get_signals(None, None)?;
+    let hotspots = db.get_hotspots(100)?;
+
+    let export = serde_json::json!({
+        "stats": stats,
+        "signals": signals,
+        "hotspots": hotspots,
+    });
+
+    let output = serde_json::to_string_pretty(&export)?;
 
     if let Some(path) = args.output {
-        fs::write(path, rendered)?;
+        std::fs::write(&path, &output)?;
+        eprintln!("Exported to {}", path.display());
     } else {
-        println!("{rendered}");
+        println!("{output}");
     }
 
-    Ok(exit_code(lambda))
-}
-
-fn resolve_input_path(path: &Path) -> Result<(PathBuf, String), CliError> {
-    if path.is_dir() {
-        let scip_path = path.join("index.scip");
-        if !scip_path.is_file() {
-            return Err(CliError::MissingIndex(path.display().to_string()));
-        }
-        return Ok((scip_path, path.display().to_string()));
-    }
-    if path.is_file() {
-        return Ok((path.to_path_buf(), path.display().to_string()));
-    }
-    Err(CliError::InvalidInput(path.display().to_string()))
-}
-
-fn status_from_lambda(lambda: f64) -> &'static str {
-    if lambda >= 1.0 { "critical" } else { "stable" }
-}
-
-fn exit_code(lambda: f64) -> i32 {
-    if lambda >= 1.0 { 1 } else { 0 }
-}
-
-fn format_text_report(report: &AnalyzeReport, graph: &IsingGraph) -> String {
-    let mut lines = Vec::new();
-    lines.push("Ising Health Report".to_string());
-    lines.push("═══════════════════".to_string());
-    lines.push(format!("Repository:   {}", report.path));
-    lines.push(format!("Symbols:      {}", report.summary.symbols));
-    lines.push(format!("Dependencies: {}", report.summary.dependencies));
-    lines.push(String::new());
-    lines.push(format!(
-        "λ_max:        {:.2}  {}",
-        report.health.lambda_max,
-        if report.health.status == "critical" {
-            "⚠ CRITICAL (>= 1.0)"
-        } else {
-            "✓ STABLE (< 1.0)"
-        }
-    ));
-    lines.push(format!("Modularity:   {:.2}", report.health.modularity_q));
-    lines.push(String::new());
-    lines.push("Top coupling hotspots:".to_string());
-
-    for (rank, (name, degree)) in top_hotspots(graph).into_iter().take(5).enumerate() {
-        lines.push(format!("  {}. {} (degree: {})", rank + 1, name, degree));
-    }
-
-    lines.join("\n")
-}
-
-fn top_hotspots(graph: &IsingGraph) -> Vec<(String, usize)> {
-    let mut hotspots: Vec<(String, usize)> = graph
-        .graph
-        .node_indices()
-        .map(|node| {
-            let degree = graph.graph.neighbors(node).count()
-                + graph
-                    .graph
-                    .neighbors_directed(node, petgraph::Direction::Incoming)
-                    .count();
-            (graph.graph[node].file.clone(), degree)
-        })
-        .collect();
-
-    hotspots.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    hotspots
-}
-
-fn estimate_modularity_q(graph: &IsingGraph) -> f64 {
-    let n = graph.node_count();
-    if n == 0 {
-        return 1.0;
-    }
-
-    let mut union_find = UnionFind::new(n);
-    let mut edges = HashSet::new();
-    let mut degree = vec![0usize; n];
-
-    for edge in graph.graph.edge_references() {
-        let s = edge.source().index();
-        let t = edge.target().index();
-        union_find.union(s, t);
-        if s == t {
-            continue;
-        }
-        let (a, b) = if s < t { (s, t) } else { (t, s) };
-        if edges.insert((a, b)) {
-            degree[a] += 1;
-            degree[b] += 1;
-        }
-    }
-
-    let m = edges.len() as f64;
-    if m == 0.0 {
-        return 1.0;
-    }
-
-    let mut community = vec![0usize; n];
-    for (i, item) in community.iter_mut().enumerate() {
-        *item = union_find.find(i);
-    }
-
-    let mut sum = 0.0;
-    for i in 0..n {
-        for j in 0..n {
-            if community[i] != community[j] {
-                continue;
-            }
-            let (a, b) = if i < j { (i, j) } else { (j, i) };
-            let a_ij = if i != j && edges.contains(&(a, b)) {
-                1.0
-            } else {
-                0.0
-            };
-            sum += a_ij - (degree[i] as f64 * degree[j] as f64) / (2.0 * m);
-        }
-    }
-
-    (sum / (2.0 * m)).clamp(-1.0, 1.0)
+    Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use protobuf::{EnumOrUnknown, Message};
-    use scip::types::{Document, Index, Occurrence, SymbolInformation, SymbolRole, symbol_information};
-    use tempfile::NamedTempFile;
 
-    fn make_symbol(symbol: &str) -> SymbolInformation {
-        SymbolInformation {
-            symbol: symbol.to_string(),
-            kind: EnumOrUnknown::new(symbol_information::Kind::Function),
-            ..Default::default()
-        }
-    }
-
-    fn def_occ(symbol: &str, range: Vec<i32>) -> Occurrence {
-        Occurrence {
-            symbol: symbol.to_string(),
-            symbol_roles: SymbolRole::Definition as i32,
-            range,
-            ..Default::default()
-        }
-    }
-
-    fn ref_occ(symbol: &str, range: Vec<i32>) -> Occurrence {
-        Occurrence {
-            symbol: symbol.to_string(),
-            symbol_roles: SymbolRole::ReadAccess as i32,
-            range,
-            ..Default::default()
-        }
-    }
-
-    fn write_index(index: Index) -> NamedTempFile {
-        let mut tmp = NamedTempFile::new().unwrap();
-        index.write_to_writer(&mut tmp).unwrap();
-        tmp
-    }
-
-    fn stable_index_file() -> NamedTempFile {
-        write_index(Index {
-            documents: vec![Document {
-                relative_path: "src/lib.rs".to_string(),
-                symbols: vec![make_symbol("sym a"), make_symbol("sym b")],
-                occurrences: vec![
-                    def_occ("sym a", vec![0, 0, 2, 0]),
-                    def_occ("sym b", vec![3, 0, 5, 0]),
-                    ref_occ("sym b", vec![1, 0, 1, 1]),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-    }
-
-    fn critical_index_file() -> NamedTempFile {
-        write_index(Index {
-            documents: vec![Document {
-                relative_path: "src/lib.rs".to_string(),
-                symbols: vec![make_symbol("a"), make_symbol("b"), make_symbol("c")],
-                occurrences: vec![
-                    def_occ("a", vec![0, 0, 3, 0]),
-                    def_occ("b", vec![4, 0, 7, 0]),
-                    def_occ("c", vec![8, 0, 11, 0]),
-                    ref_occ("b", vec![1, 0, 1, 1]),
-                    ref_occ("c", vec![2, 0, 2, 1]),
-                    ref_occ("a", vec![5, 0, 5, 1]),
-                    ref_occ("c", vec![6, 0, 6, 1]),
-                    ref_occ("a", vec![9, 0, 9, 1]),
-                    ref_occ("b", vec![10, 0, 10, 1]),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
+    #[test]
+    fn verify_cli_structure() {
+        Cli::command().debug_assert();
     }
 
     #[test]
-    fn analyze_json_output_schema() {
-        let file = stable_index_file();
-        let output = NamedTempFile::new().unwrap();
-        let cli = Cli::parse_from([
-            "ising",
-            "analyze",
-            file.path().to_str().unwrap(),
-            "--format",
-            "json",
-            "--output",
-            output.path().to_str().unwrap(),
-        ]);
-        let code = run(cli).unwrap();
-        assert_eq!(code, 0);
-
-        let raw = fs::read_to_string(output.path()).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert!(json.get("version").is_some());
-        assert!(json.get("path").is_some());
-        assert!(json.get("health").and_then(|h| h.get("lambda_max")).is_some());
-        assert!(json.get("health").and_then(|h| h.get("modularity_q")).is_some());
-        assert!(json.get("summary").and_then(|s| s.get("symbols")).is_some());
-        assert!(json.get("summary").and_then(|s| s.get("dependencies")).is_some());
-    }
-
-    #[test]
-    fn analyze_text_output_written_to_file() {
-        let file = stable_index_file();
-        let output = NamedTempFile::new().unwrap();
-        let cli = Cli::parse_from([
-            "ising",
-            "analyze",
-            file.path().to_str().unwrap(),
-            "--format",
-            "text",
-            "--output",
-            output.path().to_str().unwrap(),
-        ]);
-        let code = run(cli).unwrap();
-        assert_eq!(code, 0);
-
-        let raw = fs::read_to_string(output.path()).unwrap();
-        assert!(raw.contains("Ising Health Report"));
-        assert!(raw.contains("Top coupling hotspots:"));
-    }
-
-    #[test]
-    fn exit_code_critical_when_lambda_at_least_one() {
-        let file = critical_index_file();
-        let output = NamedTempFile::new().unwrap();
-        let cli = Cli::parse_from([
-            "ising",
-            "analyze",
-            file.path().to_str().unwrap(),
-            "--output",
-            output.path().to_str().unwrap(),
-        ]);
-        let code = run(cli).unwrap();
-        assert_eq!(code, 1);
-    }
-
-    #[test]
-    fn help_and_version_are_exposed() {
-        let cmd = Cli::command();
-        cmd.debug_assert();
-
+    fn help_is_exposed() {
         let help = Cli::try_parse_from(["ising", "--help"]).unwrap_err();
         assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
 
+    #[test]
+    fn version_is_exposed() {
         let version = Cli::try_parse_from(["ising", "--version"]).unwrap_err();
         assert_eq!(version.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
 
-        let analyze_help = Cli::try_parse_from(["ising", "analyze", "--help"]).unwrap_err();
-        assert_eq!(analyze_help.kind(), clap::error::ErrorKind::DisplayHelp);
+    #[test]
+    fn build_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "build", "--repo-path", "."]).unwrap();
+        assert!(matches!(cli.command, Commands::Build(_)));
+    }
+
+    #[test]
+    fn impact_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "impact", "src/main.rs"]).unwrap();
+        assert!(matches!(cli.command, Commands::Impact(_)));
+    }
+
+    #[test]
+    fn hotspots_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "hotspots", "--top", "10"]).unwrap();
+        assert!(matches!(cli.command, Commands::Hotspots(_)));
+    }
+
+    #[test]
+    fn signals_command_parses() {
+        let cli =
+            Cli::try_parse_from(["ising", "signals", "--type", "ghost_coupling", "--min-severity", "0.5"])
+                .unwrap();
+        assert!(matches!(cli.command, Commands::Signals(_)));
+    }
+
+    #[test]
+    fn stats_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "stats"]).unwrap();
+        assert!(matches!(cli.command, Commands::Stats(_)));
     }
 }

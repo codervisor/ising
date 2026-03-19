@@ -1,5 +1,5 @@
 [workspace]
-members = ["ising-core", "ising-scip", "ising-cli"]
+members = ["ising-core", "ising-scip", "ising-cli", "ising-db", "ising-builders", "ising-analysis", "ising-server"]
 resolver = "2"
 
 [workspace.package]
@@ -14,6 +14,18 @@ rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+anyhow = "1"
 scip = "0.6"
 protobuf = "3"
 clap = { version = "4.5", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tree-sitter = "0.24"
+gix = { version = "0.68", default-features = false, features = ["basic", "parallel"] }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+walkdir = "2"
+regex = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
