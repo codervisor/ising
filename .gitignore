@@ -30,3 +30,6 @@ Thumbs.db
 # SCIP
 *.scip
 *.scip.json
+
+# Ising generated database
+ising.db
