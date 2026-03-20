@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Top-level configuration for Ising.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub build: BuildConfig,
@@ -112,16 +112,6 @@ fn default_p80() -> u32 {
 }
 fn default_p90() -> u32 {
     90
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            build: BuildConfig::default(),
-            thresholds: ThresholdConfig::default(),
-            percentiles: PercentileConfig::default(),
-        }
-    }
 }
 
 impl Default for BuildConfig {

@@ -61,26 +61,54 @@ def unused():
     )
     .unwrap();
 
-    let graph = ising_builders::structural::build_structural_graph(dir.path(), &ising_core::ignore::IgnoreRules::parse("")).unwrap();
+    let graph = ising_builders::structural::build_structural_graph(
+        dir.path(),
+        &ising_core::ignore::IgnoreRules::parse(""),
+    )
+    .unwrap();
 
     // Should have module nodes for both files
-    assert!(graph.get_node("main.py").is_some(), "main.py module node missing");
-    assert!(graph.get_node("utils.py").is_some(), "utils.py module node missing");
+    assert!(
+        graph.get_node("main.py").is_some(),
+        "main.py module node missing"
+    );
+    assert!(
+        graph.get_node("utils.py").is_some(),
+        "utils.py module node missing"
+    );
 
     // Should have function nodes
-    assert!(graph.get_node("main.py::main").is_some(), "main function missing");
-    assert!(graph.get_node("main.py::Application").is_some(), "Application class missing");
-    assert!(graph.get_node("utils.py::helper").is_some(), "helper function missing");
-    assert!(graph.get_node("utils.py::unused").is_some(), "unused function missing");
+    assert!(
+        graph.get_node("main.py::main").is_some(),
+        "main function missing"
+    );
+    assert!(
+        graph.get_node("main.py::Application").is_some(),
+        "Application class missing"
+    );
+    assert!(
+        graph.get_node("utils.py::helper").is_some(),
+        "helper function missing"
+    );
+    assert!(
+        graph.get_node("utils.py::unused").is_some(),
+        "unused function missing"
+    );
 
     // Should have contains edges
     let contains = graph.edges_of_type(&EdgeType::Contains);
-    assert!(contains.len() >= 4, "Expected >= 4 contains edges, got {}", contains.len());
+    assert!(
+        contains.len() >= 4,
+        "Expected >= 4 contains edges, got {}",
+        contains.len()
+    );
 
     // Should have import edge from main.py -> utils.py
     let imports = graph.edges_of_type(&EdgeType::Imports);
     assert!(
-        imports.iter().any(|(src, tgt, _)| *src == "main.py" && *tgt == "utils.py"),
+        imports
+            .iter()
+            .any(|(src, tgt, _)| *src == "main.py" && *tgt == "utils.py"),
         "Expected import edge main.py -> utils.py, got: {:?}",
         imports
     );
@@ -111,12 +139,28 @@ function main() {
     )
     .unwrap();
 
-    let graph = ising_builders::structural::build_structural_graph(dir.path(), &ising_core::ignore::IgnoreRules::parse("")).unwrap();
+    let graph = ising_builders::structural::build_structural_graph(
+        dir.path(),
+        &ising_core::ignore::IgnoreRules::parse(""),
+    )
+    .unwrap();
 
-    assert!(graph.get_node("app.ts").is_some(), "app.ts module node missing");
-    assert!(graph.get_node("app.ts::greet").is_some(), "greet function missing");
-    assert!(graph.get_node("app.ts::UserService").is_some(), "UserService class missing");
-    assert!(graph.get_node("app.ts::main").is_some(), "main function missing");
+    assert!(
+        graph.get_node("app.ts").is_some(),
+        "app.ts module node missing"
+    );
+    assert!(
+        graph.get_node("app.ts::greet").is_some(),
+        "greet function missing"
+    );
+    assert!(
+        graph.get_node("app.ts::UserService").is_some(),
+        "UserService class missing"
+    );
+    assert!(
+        graph.get_node("app.ts::main").is_some(),
+        "main function missing"
+    );
 }
 
 #[test]
@@ -141,18 +185,43 @@ fn test_change_graph_with_git_history() {
     git(dir.path(), &["commit", "-m", "update a only"]);
 
     let config = Config::default();
-    let graph = ising_builders::change::build_change_graph(dir.path(), &config, &ising_core::ignore::IgnoreRules::parse("")).unwrap();
+    let graph = ising_builders::change::build_change_graph(
+        dir.path(),
+        &config,
+        &ising_core::ignore::IgnoreRules::parse(""),
+    )
+    .unwrap();
 
     // Should have nodes for both files
-    assert!(graph.get_node("a.py").is_some(), "a.py missing from change graph");
-    assert!(graph.get_node("b.py").is_some(), "b.py missing from change graph");
+    assert!(
+        graph.get_node("a.py").is_some(),
+        "a.py missing from change graph"
+    );
+    assert!(
+        graph.get_node("b.py").is_some(),
+        "b.py missing from change graph"
+    );
 
     // Check change frequencies
-    let a_metrics = graph.change_metrics.get("a.py").expect("a.py change metrics missing");
-    assert!(a_metrics.change_freq >= 2, "a.py should have freq >= 2, got {}", a_metrics.change_freq);
+    let a_metrics = graph
+        .change_metrics
+        .get("a.py")
+        .expect("a.py change metrics missing");
+    assert!(
+        a_metrics.change_freq >= 2,
+        "a.py should have freq >= 2, got {}",
+        a_metrics.change_freq
+    );
 
-    let b_metrics = graph.change_metrics.get("b.py").expect("b.py change metrics missing");
-    assert!(b_metrics.change_freq >= 1, "b.py should have freq >= 1, got {}", b_metrics.change_freq);
+    let b_metrics = graph
+        .change_metrics
+        .get("b.py")
+        .expect("b.py change metrics missing");
+    assert!(
+        b_metrics.change_freq >= 1,
+        "b.py should have freq >= 1, got {}",
+        b_metrics.change_freq
+    );
 }
 
 #[test]
@@ -177,7 +246,11 @@ fn test_full_build_pipeline() {
     let graph = ising_builders::build_all(dir.path(), &config).unwrap();
 
     // Should have merged structural + change nodes
-    assert!(graph.node_count() >= 2, "Expected >= 2 nodes, got {}", graph.node_count());
+    assert!(
+        graph.node_count() >= 2,
+        "Expected >= 2 nodes, got {}",
+        graph.node_count()
+    );
 
     // Verify it can be stored in the database
     let db = ising_db::Database::open_in_memory().unwrap();

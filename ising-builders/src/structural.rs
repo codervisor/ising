@@ -83,7 +83,10 @@ struct ImportInfo {
 }
 
 /// Build the structural graph for all supported source files in a directory.
-pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<UnifiedGraph, anyhow::Error> {
+pub fn build_structural_graph(
+    repo_path: &Path,
+    ignore: &IgnoreRules,
+) -> Result<UnifiedGraph, anyhow::Error> {
     let source_files = walk_source_files(repo_path, ignore);
 
     let file_results: Vec<FileAnalysis> = source_files
@@ -117,8 +120,12 @@ pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<
         // Add class nodes + contains edges
         for class in &result.classes {
             let class_id = format!("{}::{}", result.module_id, class.name);
-            let mut class_node =
-                Node::class(&class_id, &result.file_path, class.line_start, class.line_end);
+            let mut class_node = Node::class(
+                &class_id,
+                &result.file_path,
+                class.line_start,
+                class.line_end,
+            );
             class_node.language = Some(result.language.clone());
             class_node.complexity = Some(class.complexity);
             module_complexity += class.complexity;
@@ -127,18 +134,16 @@ pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<
         }
 
         // Set module-level complexity as sum of all function/class complexities
-        if module_complexity > 0 {
-            if let Some(module_node) = graph.get_node_mut(&result.module_id) {
-                module_node.complexity = Some(module_complexity);
-            }
+        if module_complexity > 0
+            && let Some(module_node) = graph.get_node_mut(&result.module_id)
+        {
+            module_node.complexity = Some(module_complexity);
         }
     }
 
     // Resolve import edges between modules
-    let module_ids: std::collections::HashSet<&str> = file_results
-        .iter()
-        .map(|r| r.module_id.as_str())
-        .collect();
+    let module_ids: std::collections::HashSet<&str> =
+        file_results.iter().map(|r| r.module_id.as_str()).collect();
 
     for result in &file_results {
         for imp in &result.imports {
@@ -148,7 +153,8 @@ pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<
                 // Try package resolution: foo/bar.py -> foo/bar/__init__.py
                 let package_init = imp.source.trim_end_matches(".py").to_string() + "/__init__.py";
                 if module_ids.contains(package_init.as_str()) {
-                    let _ = graph.add_edge(&result.module_id, &package_init, EdgeType::Imports, 1.0);
+                    let _ =
+                        graph.add_edge(&result.module_id, &package_init, EdgeType::Imports, 1.0);
                 }
             }
         }
@@ -223,11 +229,22 @@ fn analyze_file(
         parser.set_language(&ts_lang)?;
         if let Some(tree) = parser.parse(&source, None) {
             let root = tree.root_node();
-            extract_nodes(root, &source, lang, &relative_path, &mut functions, &mut classes, &mut imports);
+            extract_nodes(
+                root,
+                &source,
+                lang,
+                &relative_path,
+                &mut functions,
+                &mut classes,
+                &mut imports,
+            );
         }
     } else {
         // Fallback: just create the module node, no function/class extraction
-        tracing::debug!("No tree-sitter grammar for {}, using basic analysis", lang.name());
+        tracing::debug!(
+            "No tree-sitter grammar for {}, using basic analysis",
+            lang.name()
+        );
     }
 
     Ok(FileAnalysis {
@@ -252,7 +269,9 @@ fn extract_nodes(
     imports: &mut Vec<ImportInfo>,
 ) {
     match lang {
-        Language::Python => extract_python_nodes(node, source, relative_path, functions, classes, imports),
+        Language::Python => {
+            extract_python_nodes(node, source, relative_path, functions, classes, imports)
+        }
         Language::TypeScript | Language::JavaScript => {
             extract_ts_nodes(node, source, functions, classes, imports);
         }
@@ -315,7 +334,9 @@ fn extract_python_nodes(
                     for name_child in child.children(&mut name_cursor) {
                         if name_child.kind() == "dotted_name" || name_child.kind() == "identifier" {
                             // Skip the module_name node itself
-                            if Some(name_child.id()) == child.child_by_field_name("module_name").map(|n| n.id()) {
+                            if Some(name_child.id())
+                                == child.child_by_field_name("module_name").map(|n| n.id())
+                            {
                                 continue;
                             }
                             let name = name_child
@@ -324,7 +345,8 @@ fn extract_python_nodes(
                                 .to_string();
                             if !name.is_empty() {
                                 let submodule = format!("{}.{}", module, name);
-                                if let Some(path) = resolve_python_import(&submodule, relative_path) {
+                                if let Some(path) = resolve_python_import(&submodule, relative_path)
+                                {
                                     imports.push(ImportInfo { source: path });
                                 }
                             }
@@ -363,7 +385,10 @@ fn resolve_python_import(module: &str, current_file: &str) -> Option<String> {
     }
 
     // Relative import
-    let current_dir = Path::new(current_file).parent()?.to_string_lossy().to_string();
+    let current_dir = Path::new(current_file)
+        .parent()?
+        .to_string_lossy()
+        .to_string();
     let mut base = PathBuf::from(&current_dir);
     for _ in 0..(dots - 1) {
         base = base.parent()?.to_path_buf();
@@ -628,11 +653,7 @@ class AppService {
             "from utils import helper\n\ndef main():\n    pass\n",
         )
         .unwrap();
-        fs::write(
-            dir.path().join("utils.py"),
-            "def helper():\n    pass\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("utils.py"), "def helper():\n    pass\n").unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // Check that an import edge was created from main.py -> utils.py

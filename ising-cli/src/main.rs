@@ -193,9 +193,9 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
 
     // Store signals
     for signal in &signals {
-        let details = serde_json::to_value(&signal)?;
+        let details = serde_json::to_value(signal)?;
         db.store_signal(
-            &serde_json::to_value(&signal.signal_type)?
+            serde_json::to_value(&signal.signal_type)?
                 .as_str()
                 .unwrap_or("unknown"),
             &signal.node_a,
@@ -261,7 +261,10 @@ fn cmd_impact(args: ImpactArgs) -> Result<i32> {
     }
 
     if !impact.structural_deps.is_empty() {
-        println!("Structural Dependencies (fan-out: {}):", impact.structural_deps.len());
+        println!(
+            "Structural Dependencies (fan-out: {}):",
+            impact.structural_deps.len()
+        );
         for (target, edge_type, _weight) in &impact.structural_deps {
             println!("  -> {target}  ({edge_type})");
         }
@@ -284,10 +287,7 @@ fn cmd_impact(args: ImpactArgs) -> Result<i32> {
                 .as_deref()
                 .map(|b| format!(" <-> {b}"))
                 .unwrap_or_default();
-            println!(
-                "  [{:.2}] {}{node_b}",
-                signal.severity, signal.signal_type
-            );
+            println!("  [{:.2}] {}{node_b}", signal.severity, signal.signal_type);
         }
     }
 
@@ -462,7 +462,7 @@ fn generate_mermaid(db: &Database) -> Result<String> {
 
     // Add hotspot nodes
     for (id, score, _, _) in &hotspots {
-        let safe_id = id.replace('/', "_").replace('.', "_").replace(':', "_");
+        let safe_id = id.replace(['/', '.', ':'], "_");
         let label = id.replace('"', "");
         if *score > 0.7 {
             out.push_str(&format!("  {safe_id}[\"{label}\\n🔥 {score:.2}\"]:::hot\n"));
@@ -474,15 +474,8 @@ fn generate_mermaid(db: &Database) -> Result<String> {
     // Add signal edges
     for signal in &signals {
         if let Some(node_b) = &signal.node_b {
-            let safe_a = signal
-                .node_a
-                .replace('/', "_")
-                .replace('.', "_")
-                .replace(':', "_");
-            let safe_b = node_b
-                .replace('/', "_")
-                .replace('.', "_")
-                .replace(':', "_");
+            let safe_a = signal.node_a.replace(['/', '.', ':'], "_");
+            let safe_b = node_b.replace(['/', '.', ':'], "_");
             let arrow = match signal.signal_type.as_str() {
                 "ghost_coupling" => "-.->",
                 "fragile_boundary" => "==>",
@@ -563,9 +556,15 @@ mod tests {
 
     #[test]
     fn signals_command_parses() {
-        let cli =
-            Cli::try_parse_from(["ising", "signals", "--type", "ghost_coupling", "--min-severity", "0.5"])
-                .unwrap();
+        let cli = Cli::try_parse_from([
+            "ising",
+            "signals",
+            "--type",
+            "ghost_coupling",
+            "--min-severity",
+            "0.5",
+        ])
+        .unwrap();
         assert!(matches!(cli.command, Commands::Signals(_)));
     }
 

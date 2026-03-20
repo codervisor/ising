@@ -1,9 +1,9 @@
 //! Node and graph-level metric computation.
 
 use crate::graph::{Edge, EdgeLayer, UnifiedGraph};
+use petgraph::Direction;
 use petgraph::graph::EdgeReference;
 use petgraph::visit::EdgeRef;
-use petgraph::Direction;
 
 /// Computed structural metrics for a node.
 #[derive(Debug, Clone, Default)]
@@ -97,7 +97,7 @@ pub fn compute_graph_metrics(graph: &UnifiedGraph) -> GraphMetrics {
 }
 
 /// Compute the Nth percentile of a sorted slice of f64 values.
-pub fn percentile(values: &mut Vec<f64>, p: u32) -> f64 {
+pub fn percentile(values: &mut [f64], p: u32) -> f64 {
     if values.is_empty() {
         return 0.0;
     }

@@ -4,7 +4,7 @@
 //! to a single SQLite file for fast CLI queries and MCP tool serving.
 
 use ising_core::graph::{ChangeMetrics, NodeType, UnifiedGraph};
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -182,7 +182,7 @@ impl Database {
                     let metadata = edge
                         .metadata
                         .as_ref()
-                        .map(|m| serde_json::to_string(m))
+                        .map(serde_json::to_string)
                         .transpose()?;
                     stmt.execute(params![
                         src_id,
@@ -223,7 +223,10 @@ impl Database {
             )?;
             for (node_id, dm) in &graph.defect_metrics {
                 stmt.execute(params![
-                    node_id, dm.bug_count, dm.defect_density, dm.fix_inducing_rate,
+                    node_id,
+                    dm.bug_count,
+                    dm.defect_density,
+                    dm.fix_inducing_rate,
                 ])?;
             }
         }
@@ -242,9 +245,7 @@ impl Database {
         details: Option<&serde_json::Value>,
     ) -> Result<(), DbError> {
         let now = chrono::Utc::now().to_rfc3339();
-        let details_str = details
-            .map(|d| serde_json::to_string(d))
-            .transpose()?;
+        let details_str = details.map(serde_json::to_string).transpose()?;
         self.conn.execute(
             "INSERT INTO signals (signal_type, node_a, node_b, severity, details, detected_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -505,9 +506,9 @@ impl Database {
 
         // Edges
         let edges: Vec<VizEdge> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT source, target, layer, edge_type, weight, metadata FROM edges",
-            )?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT source, target, layer, edge_type, weight, metadata FROM edges")?;
             stmt.query_map([], |row| {
                 let metadata_str: Option<String> = row.get(5)?;
                 let metadata = metadata_str
@@ -717,7 +718,10 @@ fn find_common_prefix(paths: &[String]) -> String {
     for i in 0..parts.len().saturating_sub(1) {
         let candidate = &parts[..=i];
         let prefix = candidate.join("/");
-        if paths.iter().all(|p| p.starts_with(&prefix) && p.as_bytes().get(prefix.len()) == Some(&b'/')) {
+        if paths
+            .iter()
+            .all(|p| p.starts_with(&prefix) && p.as_bytes().get(prefix.len()) == Some(&b'/'))
+        {
             prefix_len = i + 1;
         } else {
             break;
@@ -733,7 +737,7 @@ fn find_common_prefix(paths: &[String]) -> String {
 /// Derive module name from a file path by stripping common prefix and taking first dir component.
 fn derive_module(file_path: &str, common_prefix: &str) -> String {
     let stripped = if !common_prefix.is_empty() && file_path.starts_with(common_prefix) {
-        &file_path[common_prefix.len()..].trim_start_matches('/')
+        file_path[common_prefix.len()..].trim_start_matches('/')
     } else {
         file_path
     };
