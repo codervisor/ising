@@ -13,6 +13,7 @@
 pub mod config;
 pub mod error;
 pub mod graph;
+pub mod ignore;
 pub mod metrics;
 
 pub use error::IsingError;

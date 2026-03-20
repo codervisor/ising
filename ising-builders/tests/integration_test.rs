@@ -61,7 +61,7 @@ def unused():
     )
     .unwrap();
 
-    let graph = ising_builders::structural::build_structural_graph(dir.path()).unwrap();
+    let graph = ising_builders::structural::build_structural_graph(dir.path(), &ising_core::ignore::IgnoreRules::parse("")).unwrap();
 
     // Should have module nodes for both files
     assert!(graph.get_node("main.py").is_some(), "main.py module node missing");
@@ -111,7 +111,7 @@ function main() {
     )
     .unwrap();
 
-    let graph = ising_builders::structural::build_structural_graph(dir.path()).unwrap();
+    let graph = ising_builders::structural::build_structural_graph(dir.path(), &ising_core::ignore::IgnoreRules::parse("")).unwrap();
 
     assert!(graph.get_node("app.ts").is_some(), "app.ts module node missing");
     assert!(graph.get_node("app.ts::greet").is_some(), "greet function missing");
@@ -141,7 +141,7 @@ fn test_change_graph_with_git_history() {
     git(dir.path(), &["commit", "-m", "update a only"]);
 
     let config = Config::default();
-    let graph = ising_builders::change::build_change_graph(dir.path(), &config).unwrap();
+    let graph = ising_builders::change::build_change_graph(dir.path(), &config, &ising_core::ignore::IgnoreRules::parse("")).unwrap();
 
     // Should have nodes for both files
     assert!(graph.get_node("a.py").is_some(), "a.py missing from change graph");

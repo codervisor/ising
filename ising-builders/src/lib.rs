@@ -10,12 +10,18 @@ pub mod structural;
 
 use ising_core::config::Config;
 use ising_core::graph::UnifiedGraph;
+use ising_core::ignore::IgnoreRules;
 use std::path::Path;
 
 /// Build the complete multi-layer graph for a repository.
 pub fn build_all(repo_path: &Path, config: &Config) -> Result<UnifiedGraph, anyhow::Error> {
+    let ignore = IgnoreRules::load(repo_path);
+    if !ignore.is_empty() {
+        tracing::info!("Loaded .isingignore rules");
+    }
+
     tracing::info!("Building structural graph...");
-    let structural = structural::build_structural_graph(repo_path)?;
+    let structural = structural::build_structural_graph(repo_path, &ignore)?;
     tracing::info!(
         "Structural graph: {} nodes, {} edges",
         structural.node_count(),
@@ -23,7 +29,7 @@ pub fn build_all(repo_path: &Path, config: &Config) -> Result<UnifiedGraph, anyh
     );
 
     tracing::info!("Building change graph...");
-    let change = change::build_change_graph(repo_path, config)?;
+    let change = change::build_change_graph(repo_path, config, &ignore)?;
     tracing::info!(
         "Change graph: {} nodes, {} edges",
         change.node_count(),

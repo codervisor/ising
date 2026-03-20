@@ -9,6 +9,7 @@
 //! Parsing is parallelized with rayon.
 
 use ising_core::graph::{EdgeType, Node, UnifiedGraph};
+use ising_core::ignore::IgnoreRules;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -82,8 +83,8 @@ struct ImportInfo {
 }
 
 /// Build the structural graph for all supported source files in a directory.
-pub fn build_structural_graph(repo_path: &Path) -> Result<UnifiedGraph, anyhow::Error> {
-    let source_files = walk_source_files(repo_path);
+pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<UnifiedGraph, anyhow::Error> {
+    let source_files = walk_source_files(repo_path, ignore);
 
     let file_results: Vec<FileAnalysis> = source_files
         .par_iter()
@@ -151,7 +152,7 @@ pub fn build_structural_graph(repo_path: &Path) -> Result<UnifiedGraph, anyhow::
 }
 
 /// Walk the repository and collect all supported source files with their language.
-fn walk_source_files(repo_path: &Path) -> Vec<(PathBuf, Language)> {
+fn walk_source_files(repo_path: &Path, ignore: &IgnoreRules) -> Vec<(PathBuf, Language)> {
     WalkDir::new(repo_path)
         .into_iter()
         .filter_entry(|e| {
@@ -176,6 +177,11 @@ fn walk_source_files(repo_path: &Path) -> Vec<(PathBuf, Language)> {
         .filter_map(|e| {
             let ext = e.path().extension()?.to_str()?;
             let lang = Language::from_extension(ext)?;
+            let rel = e.path().strip_prefix(repo_path).ok()?;
+            let rel_str = rel.to_string_lossy();
+            if ignore.is_ignored(&rel_str) {
+                return None;
+            }
             Some((e.into_path(), lang))
         })
         .collect()
@@ -470,7 +476,7 @@ mod tests {
         fs::write(dir.path().join("app.ts"), "console.log('hi')").unwrap();
         fs::write(dir.path().join("readme.md"), "# hello").unwrap();
 
-        let files = walk_source_files(dir.path());
+        let files = walk_source_files(dir.path(), &IgnoreRules::parse(""));
         assert_eq!(files.len(), 2);
     }
 
@@ -483,7 +489,7 @@ mod tests {
         fs::write(dir.path().join("node_modules/foo/index.js"), "x").unwrap();
         fs::write(dir.path().join("app.py"), "x").unwrap();
 
-        let files = walk_source_files(dir.path());
+        let files = walk_source_files(dir.path(), &IgnoreRules::parse(""));
         assert_eq!(files.len(), 1);
     }
 
@@ -514,7 +520,7 @@ def helper():
         )
         .unwrap();
 
-        let graph = build_structural_graph(dir.path()).unwrap();
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // 2 modules + 3 functions + 1 class = 6 nodes (methods inside class not top-level)
         assert!(
             graph.node_count() >= 5,
@@ -546,7 +552,7 @@ class AppService {
         )
         .unwrap();
 
-        let graph = build_structural_graph(dir.path()).unwrap();
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // 1 module + 1 function + 1 class = 3 nodes minimum
         assert!(
             graph.node_count() >= 3,
@@ -570,7 +576,7 @@ class AppService {
         )
         .unwrap();
 
-        let graph = build_structural_graph(dir.path()).unwrap();
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // Check that an import edge was created from main.py -> utils.py
         let _import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
         // Import resolution depends on path matching — "utils.py" must match
