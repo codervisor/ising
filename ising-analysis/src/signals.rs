@@ -151,6 +151,10 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         if is_reexport_module(a) || is_reexport_module(b) {
             continue;
         }
+        // Skip documentation examples — they naturally import core code with fan-in=1
+        if is_docs_example(a) || is_docs_example(b) {
+            continue;
+        }
         // Deduplicate: multiple imports between same pair (e.g. 5 `from .globals import X`)
         let pair: (String, String) = if a < b {
             (a.to_string(), b.to_string())
@@ -289,7 +293,10 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         let sum_coupling = change.map(|m| m.sum_coupling).unwrap_or(0.0);
 
         // Stable Core: low change freq + high fan-in + low defects
-        if freq > 0.0 && freq <= freq_p_low && fan_in >= fan_in_p_high && fan_in_p_high > 0.0 {
+        // Skip test files and documentation examples — not meaningful as "core"
+        if freq > 0.0 && freq <= freq_p_low && fan_in >= fan_in_p_high && fan_in_p_high > 0.0
+            && !is_test_file(node_id) && !is_docs_example(node_id)
+        {
             signals.push(Signal::new(
                 SignalType::StableCore,
                 node_id,
@@ -363,6 +370,18 @@ fn is_source_file(path: &str) -> bool {
         ".cs", ".swift", ".kt", ".scala",
     ];
     source_extensions.iter().any(|ext| path.ends_with(ext))
+}
+
+/// Check if a path is a documentation example (e.g., docs_src/, examples/).
+/// These files naturally have fan-in=1 and rarely co-change with their imports,
+/// but flagging them as over-engineering or stable core is noise.
+fn is_docs_example(path: &str) -> bool {
+    path.starts_with("docs_src/")
+        || path.starts_with("docs/")
+        || path.starts_with("examples/")
+        || path.starts_with("example/")
+        || path.contains("/docs_src/")
+        || path.contains("/examples/")
 }
 
 fn is_reexport_module(path: &str) -> bool {
