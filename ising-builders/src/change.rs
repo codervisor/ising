@@ -21,6 +21,28 @@ fn is_source_file(path: &str) -> bool {
     )
 }
 
+/// Parse a time window string (e.g., "6 months ago") into a Unix timestamp cutoff.
+fn parse_time_window(window: &str) -> Option<i64> {
+    let parts: Vec<&str> = window.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let amount: i64 = parts[0].parse().ok()?;
+    let unit = parts[1].trim_end_matches('s'); // "months" -> "month"
+    let seconds = match unit {
+        "day" => amount * 86_400,
+        "week" => amount * 7 * 86_400,
+        "month" => amount * 30 * 86_400,
+        "year" => amount * 365 * 86_400,
+        _ => return None,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(now - seconds)
+}
+
 /// Build the change graph from git history.
 pub fn build_change_graph(
     repo_path: &Path,
@@ -34,11 +56,21 @@ pub fn build_change_graph(
 
     let min_co_changes = config.thresholds.min_co_changes;
     let min_coupling = config.thresholds.min_coupling;
+    let max_commits = config.build.max_commits;
+    let max_files_per_commit = config.build.max_files_per_commit as usize;
+
+    // Parse time window into a cutoff timestamp
+    let cutoff_timestamp = parse_time_window(&config.build.time_window);
+    if let Some(ts) = cutoff_timestamp {
+        tracing::info!("Time window cutoff: {} (unix)", ts);
+    }
 
     // Collect changed files per commit by walking the commit graph
     let mut file_changes: HashMap<String, u32> = HashMap::new();
     let mut co_changes: HashMap<(String, String), u32> = HashMap::new();
     let mut total_commits: u32 = 0;
+    let mut skipped_large: u32 = 0;
+    let mut skipped_old: u32 = 0;
 
     // Walk commit ancestry
     let mut commit_id = head.id;
@@ -50,10 +82,44 @@ pub fn build_change_graph(
             break;
         }
 
+        // Respect max_commits limit
+        if max_commits > 0 && total_commits >= max_commits {
+            tracing::info!("Reached max_commits limit ({})", max_commits);
+            break;
+        }
+
         let commit = match repo.find_commit(commit_id) {
             Ok(c) => c,
             Err(_) => break,
         };
+
+        // Apply time window filter
+        if let Some(cutoff) = cutoff_timestamp {
+            let commit_time = commit.time().ok().map(|t| t.seconds);
+            if let Some(ct) = commit_time {
+                if ct < cutoff {
+                    skipped_old += 1;
+                    // Once we've hit commits older than the window, stop entirely
+                    // (first-parent chain is roughly chronological)
+                    if skipped_old > 100 {
+                        tracing::info!(
+                            "Stopping traversal: consistently outside time window"
+                        );
+                        break;
+                    }
+                    // Move to first parent and continue (some commits may be out of order)
+                    match commit.parent_ids().next() {
+                        Some(parent_id) => {
+                            commit_id = parent_id.detach();
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            // Reset consecutive old counter when we find an in-window commit
+            skipped_old = 0;
+        }
 
         // Get changed files by diffing against parent (only source code files, respecting .isingignore)
         let changed_files: std::collections::HashSet<String> = get_changed_files(&repo, &commit)?
@@ -62,20 +128,29 @@ pub fn build_change_graph(
             .collect();
 
         if !changed_files.is_empty() {
-            total_commits += 1;
+            // Skip bulk commits that touch too many files (noisy: mass renames, formatting, etc.)
+            if max_files_per_commit > 0 && changed_files.len() > max_files_per_commit {
+                skipped_large += 1;
+                // Still count individual file changes for frequency, but skip co-change pairs
+                for f in &changed_files {
+                    *file_changes.entry(f.clone()).or_default() += 1;
+                }
+            } else {
+                for f in &changed_files {
+                    *file_changes.entry(f.clone()).or_default() += 1;
+                }
 
-            for f in &changed_files {
-                *file_changes.entry(f.clone()).or_default() += 1;
-            }
-
-            // All unique pairs
-            let files_vec: Vec<&String> = changed_files.iter().collect();
-            for i in 0..files_vec.len() {
-                for j in (i + 1)..files_vec.len() {
-                    let key = ordered_pair(files_vec[i], files_vec[j]);
-                    *co_changes.entry(key).or_default() += 1;
+                // All unique pairs (only for reasonably-sized commits)
+                let files_vec: Vec<&String> = changed_files.iter().collect();
+                for i in 0..files_vec.len() {
+                    for j in (i + 1)..files_vec.len() {
+                        let key = ordered_pair(files_vec[i], files_vec[j]);
+                        *co_changes.entry(key).or_default() += 1;
+                    }
                 }
             }
+
+            total_commits += 1;
         }
 
         // Move to first parent
@@ -86,14 +161,31 @@ pub fn build_change_graph(
     }
 
     tracing::info!(
-        "Analyzed {} commits, {} unique files",
+        "Analyzed {} commits, {} unique files, skipped {} large commits",
         total_commits,
-        file_changes.len()
+        file_changes.len(),
+        skipped_large
     );
 
     // Add module nodes for all files seen in git history
     for file in file_changes.keys() {
         graph.add_node(Node::module(file, file));
+    }
+
+    // Pre-build a per-file index of co-change pairs for O(1) lookup
+    // instead of scanning all pairs for each file (O(n*m) -> O(n+m))
+    let mut file_cochange_index: HashMap<&str, Vec<(&str, &str, u32)>> = HashMap::new();
+    for ((a, b), count) in &co_changes {
+        if *count >= min_co_changes {
+            file_cochange_index
+                .entry(a.as_str())
+                .or_default()
+                .push((a.as_str(), b.as_str(), *count));
+            file_cochange_index
+                .entry(b.as_str())
+                .or_default()
+                .push((a.as_str(), b.as_str(), *count));
+        }
     }
 
     // Compute coupling scores and add co-change edges
@@ -113,31 +205,32 @@ pub fn build_change_graph(
         }
     }
 
-    // Compute per-file change metrics
+    // Compute per-file change metrics using the pre-built index
     let max_freq = file_changes.values().copied().max().unwrap_or(1) as f64;
     for (file, freq) in &file_changes {
         let normalized_freq = *freq as f64 / max_freq;
-        // Hotspot = normalized frequency (complexity will be merged from structural graph later)
         let hotspot = normalized_freq;
 
-        // Sum of coupling for this file
-        let sum_coupling: f64 = co_changes
-            .iter()
-            .filter(|((a, b), count)| {
-                (a == file || b == file) && *count >= &min_co_changes
+        // Sum of coupling for this file — O(neighbors) instead of O(all pairs)
+        let sum_coupling: f64 = file_cochange_index
+            .get(file.as_str())
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .map(|(a, b, count)| {
+                        let freq_a = file_changes[*a] as f64;
+                        let freq_b = file_changes[*b] as f64;
+                        let denom = freq_a.min(freq_b);
+                        if denom > 0.0 {
+                            *count as f64 / denom
+                        } else {
+                            0.0
+                        }
+                    })
+                    .filter(|c| *c >= min_coupling)
+                    .sum()
             })
-            .map(|((a, b), count)| {
-                let freq_a = file_changes[a] as f64;
-                let freq_b = file_changes[b] as f64;
-                let denom = freq_a.min(freq_b);
-                if denom > 0.0 {
-                    *count as f64 / denom
-                } else {
-                    0.0
-                }
-            })
-            .filter(|c| *c >= min_coupling)
-            .sum();
+            .unwrap_or(0.0);
 
         graph.change_metrics.insert(
             file.clone(),

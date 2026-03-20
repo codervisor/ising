@@ -23,6 +23,12 @@ pub struct BuildConfig {
     /// Database file path.
     #[serde(default = "default_db_path")]
     pub db_path: String,
+    /// Maximum number of commits to analyze (0 = unlimited).
+    #[serde(default = "default_max_commits")]
+    pub max_commits: u32,
+    /// Skip commits that touch more than this many files (noisy bulk changes).
+    #[serde(default = "default_max_files_per_commit")]
+    pub max_files_per_commit: u32,
 }
 
 /// Threshold values for signal detection.
@@ -74,6 +80,12 @@ fn default_time_window() -> String {
 fn default_db_path() -> String {
     "ising.db".to_string()
 }
+fn default_max_commits() -> u32 {
+    5000
+}
+fn default_max_files_per_commit() -> u32 {
+    50
+}
 fn default_min_co_changes() -> u32 {
     5
 }
@@ -117,6 +129,8 @@ impl Default for BuildConfig {
         Self {
             time_window: default_time_window(),
             db_path: default_db_path(),
+            max_commits: default_max_commits(),
+            max_files_per_commit: default_max_files_per_commit(),
         }
     }
 }
