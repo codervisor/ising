@@ -144,6 +144,12 @@ pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<
         for imp in &result.imports {
             if module_ids.contains(imp.source.as_str()) {
                 let _ = graph.add_edge(&result.module_id, &imp.source, EdgeType::Imports, 1.0);
+            } else if imp.source.ends_with(".py") {
+                // Try package resolution: foo/bar.py -> foo/bar/__init__.py
+                let package_init = imp.source.trim_end_matches(".py").to_string() + "/__init__.py";
+                if module_ids.contains(package_init.as_str()) {
+                    let _ = graph.add_edge(&result.module_id, &package_init, EdgeType::Imports, 1.0);
+                }
             }
         }
     }
@@ -302,6 +308,27 @@ fn extract_python_nodes(
                         .to_string();
                     if let Some(path) = resolve_python_import(&module, relative_path) {
                         imports.push(ImportInfo { source: path });
+                    }
+                    // Also try resolving imported names as submodules
+                    // e.g., "from fastapi import params" → fastapi/params.py
+                    let mut name_cursor = child.walk();
+                    for name_child in child.children(&mut name_cursor) {
+                        if name_child.kind() == "dotted_name" || name_child.kind() == "identifier" {
+                            // Skip the module_name node itself
+                            if Some(name_child.id()) == child.child_by_field_name("module_name").map(|n| n.id()) {
+                                continue;
+                            }
+                            let name = name_child
+                                .utf8_text(source.as_bytes())
+                                .unwrap_or("")
+                                .to_string();
+                            if !name.is_empty() {
+                                let submodule = format!("{}.{}", module, name);
+                                if let Some(path) = resolve_python_import(&submodule, relative_path) {
+                                    imports.push(ImportInfo { source: path });
+                                }
+                            }
+                        }
                     }
                 }
             }
