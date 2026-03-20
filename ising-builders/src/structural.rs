@@ -217,7 +217,7 @@ fn analyze_file(
         parser.set_language(&ts_lang)?;
         if let Some(tree) = parser.parse(&source, None) {
             let root = tree.root_node();
-            extract_nodes(root, &source, lang, &mut functions, &mut classes, &mut imports);
+            extract_nodes(root, &source, lang, &relative_path, &mut functions, &mut classes, &mut imports);
         }
     } else {
         // Fallback: just create the module node, no function/class extraction
@@ -240,12 +240,13 @@ fn extract_nodes(
     node: tree_sitter::Node<'_>,
     source: &str,
     lang: Language,
+    relative_path: &str,
     functions: &mut Vec<FunctionInfo>,
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
     match lang {
-        Language::Python => extract_python_nodes(node, source, functions, classes, imports),
+        Language::Python => extract_python_nodes(node, source, relative_path, functions, classes, imports),
         Language::TypeScript | Language::JavaScript => {
             extract_ts_nodes(node, source, functions, classes, imports);
         }
@@ -255,6 +256,7 @@ fn extract_nodes(
 fn extract_python_nodes(
     node: tree_sitter::Node<'_>,
     source: &str,
+    relative_path: &str,
     functions: &mut Vec<FunctionInfo>,
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
@@ -298,9 +300,9 @@ fn extract_python_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    // Convert Python dotted path to file path
-                    let path = module.replace('.', "/") + ".py";
-                    imports.push(ImportInfo { source: path });
+                    if let Some(path) = resolve_python_import(&module, relative_path) {
+                        imports.push(ImportInfo { source: path });
+                    }
                 }
             }
             "import_statement" => {
@@ -309,15 +311,44 @@ fn extract_python_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    let path = module.replace('.', "/") + ".py";
-                    imports.push(ImportInfo { source: path });
+                    if let Some(path) = resolve_python_import(&module, relative_path) {
+                        imports.push(ImportInfo { source: path });
+                    }
                 }
             }
-            _ => {
-                // Recurse into nested nodes (but not into function/class bodies for top-level extraction)
-            }
+            _ => {}
         }
     }
+}
+
+/// Resolve a Python import to a relative file path.
+/// Handles relative imports (from .ctx import X) and absolute imports (import flask.ctx).
+fn resolve_python_import(module: &str, current_file: &str) -> Option<String> {
+    if module.is_empty() {
+        return None;
+    }
+
+    let dots = module.chars().take_while(|&c| c == '.').count();
+
+    if dots == 0 {
+        // Absolute import
+        return Some(module.replace('.', "/") + ".py");
+    }
+
+    // Relative import
+    let current_dir = Path::new(current_file).parent()?.to_string_lossy().to_string();
+    let mut base = PathBuf::from(&current_dir);
+    for _ in 0..(dots - 1) {
+        base = base.parent()?.to_path_buf();
+    }
+
+    let remainder = &module[dots..];
+    if remainder.is_empty() {
+        return Some(base.join("__init__.py").to_string_lossy().to_string());
+    }
+
+    let parts = remainder.replace('.', "/");
+    Some(base.join(&parts).to_string_lossy().to_string() + ".py")
 }
 
 fn extract_ts_nodes(
