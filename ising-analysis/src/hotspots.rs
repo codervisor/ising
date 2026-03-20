@@ -17,28 +17,56 @@ pub struct Hotspot {
 }
 
 /// Rank nodes by hotspot score (change frequency × complexity).
+///
+/// When complexity data is available, the score is:
+///   normalized(change_freq) × normalized(complexity)
+/// When complexity is unavailable, falls back to normalized(change_freq).
 pub fn rank_hotspots(graph: &UnifiedGraph, top_n: usize) -> Vec<Hotspot> {
-    let mut hotspots: Vec<Hotspot> = graph
+    // First pass: collect raw data and find max values for normalization
+    let mut raw: Vec<(String, String, u32, Option<u32>, f64)> = graph
         .node_ids()
         .filter_map(|id| {
             let node = graph.get_node(id)?;
             let change = graph.change_metrics.get(id);
-            let hotspot_score = change.map(|m| m.hotspot_score).unwrap_or(0.0);
             let change_freq = change.map(|m| m.change_freq).unwrap_or(0);
-
-            // Only include nodes that have been changed at least once
             if change_freq == 0 {
                 return None;
             }
+            let churn_rate = change.map(|m| m.churn_rate).unwrap_or(0.0);
+            Some((
+                id.to_string(),
+                node.file_path.clone(),
+                change_freq,
+                node.complexity,
+                churn_rate,
+            ))
+        })
+        .collect();
 
-            Some(Hotspot {
-                node_id: id.to_string(),
-                file_path: node.file_path.clone(),
+    let max_freq = raw.iter().map(|r| r.2).max().unwrap_or(1).max(1) as f64;
+    let max_complexity = raw
+        .iter()
+        .filter_map(|r| r.3)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f64;
+
+    let mut hotspots: Vec<Hotspot> = raw
+        .drain(..)
+        .map(|(node_id, file_path, change_freq, complexity, churn_rate)| {
+            let norm_freq = change_freq as f64 / max_freq;
+            let c = complexity.unwrap_or(1).max(1);
+            let norm_complexity = c as f64 / max_complexity;
+            let hotspot_score = norm_freq * norm_complexity;
+
+            Hotspot {
+                node_id,
+                file_path,
                 hotspot_score,
                 change_freq,
-                complexity: node.complexity,
-                churn_rate: change.map(|m| m.churn_rate).unwrap_or(0.0),
-            })
+                complexity,
+                churn_rate,
+            }
         })
         .collect();
 

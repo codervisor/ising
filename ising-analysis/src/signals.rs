@@ -79,7 +79,11 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             .unwrap_or(0.0);
 
         // Ghost Coupling: no structural dep but high temporal coupling
-        if !has_structural && *coupling > thresholds.ghost_coupling_threshold {
+        // Skip test↔source pairs and non-source-file pairs (directories, configs)
+        if !has_structural && *coupling > thresholds.ghost_coupling_threshold
+            && !is_test_source_pair(a, b)
+            && is_source_file(a) && is_source_file(b)
+        {
             signals.push(Signal::new(
                 SignalType::GhostCoupling,
                 a,
@@ -111,26 +115,115 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         }
     }
 
-    // Over-Engineering: structural edges with no temporal activity
+    // Over-Engineering: detect likely unnecessary abstractions
+    //
+    // A low co-change rate between A→B is NOT a signal by itself — most stable,
+    // well-designed dependencies have exactly this profile. Instead we look for:
+    //
+    // 1. Single-consumer wrapper: B has fan-in=1 (only A uses it), B itself
+    //    has low complexity and rarely changes. The abstraction serves one
+    //    consumer and never needed updating — likely unnecessary indirection.
+    //
+    // 2. Pass-through module: A→B→C where A and C co-change but B never does.
+    //    B is an indirection layer adding no value.
+    //
+    // We skip re-export modules (__init__.py, index.ts) which naturally have
+    // many low-activity imports, and deduplicate multiple imports between the
+    // same pair.
     let import_edges = graph.edges_of_type(&EdgeType::Imports);
+
+    // Precompute structural fan-in (import edges incoming) per node
+    let mut fan_in_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (_, target, _) in &import_edges {
+        *fan_in_map.entry(target).or_default() += 1;
+    }
+
+    // Build adjacency list for import edges (for pass-through detection)
+    let mut import_targets: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
+    for (src, tgt, _) in &import_edges {
+        import_targets.entry(src).or_default().push(tgt);
+    }
+
+    let mut seen_import_pairs = std::collections::HashSet::new();
     for (a, b, _) in &import_edges {
-        let coupling = graph
+        // Skip re-export modules — these are package entry points with many low-activity imports
+        if is_reexport_module(a) || is_reexport_module(b) {
+            continue;
+        }
+        // Deduplicate: multiple imports between same pair (e.g. 5 `from .globals import X`)
+        let pair: (String, String) = if a < b {
+            (a.to_string(), b.to_string())
+        } else {
+            (b.to_string(), a.to_string())
+        };
+        if !seen_import_pairs.insert(pair) {
+            continue;
+        }
+
+        let coupling_ab = graph
             .edge_weight(a, b, &EdgeType::CoChanges)
             .unwrap_or(0.0);
-        let fault_prop = graph
-            .edge_weight(a, b, &EdgeType::FaultPropagates)
-            .unwrap_or(0.0);
-        if coupling < thresholds.over_engineering_coupling && fault_prop == 0.0 {
+
+        // Skip if they do co-change — the dependency is actively used
+        if coupling_ab >= thresholds.over_engineering_coupling {
+            continue;
+        }
+
+        let b_fan_in = fan_in_map.get(b).copied().unwrap_or(0);
+        let b_change_freq = graph
+            .change_metrics
+            .get(*b)
+            .map(|m| m.change_freq)
+            .unwrap_or(0);
+        let b_complexity = graph
+            .get_node(b)
+            .and_then(|n| n.complexity)
+            .unwrap_or(0);
+
+        // Signal 1: Single-consumer wrapper
+        // B has exactly one consumer (A), B is low-complexity, and B rarely changes
+        if b_fan_in == 1 && b_complexity <= 5 && b_change_freq <= 1 {
             signals.push(Signal::new(
                 SignalType::OverEngineering,
                 a,
                 Some(b),
-                0.3,
+                0.4,
                 format!(
-                    "Structural dependency exists but <{:.0}% co-change and zero fault propagation. Dependency may be unnecessary.",
-                    thresholds.over_engineering_coupling * 100.0
+                    "Single-consumer wrapper: only {} imports {}, which has complexity {} and {} changes. Consider inlining.",
+                    a, b, b_complexity, b_change_freq
                 ),
             ));
+            continue;
+        }
+
+        // Signal 2: Pass-through module
+        // A→B→C where A↔C co-change but A↔B and B↔C don't
+        if let Some(b_targets) = import_targets.get(b) {
+            for c in b_targets {
+                let coupling_ac = graph
+                    .edge_weight(a, c, &EdgeType::CoChanges)
+                    .unwrap_or(0.0);
+                let coupling_bc = graph
+                    .edge_weight(b, c, &EdgeType::CoChanges)
+                    .unwrap_or(0.0);
+
+                if coupling_ac > thresholds.ghost_coupling_threshold
+                    && coupling_bc < thresholds.over_engineering_coupling
+                {
+                    signals.push(Signal::new(
+                        SignalType::OverEngineering,
+                        a,
+                        Some(b),
+                        coupling_ac * 0.5,
+                        format!(
+                            "Pass-through: {} imports {} imports {}, but {} and {} co-change at {:.0}% while {} is dormant. Consider removing the indirection.",
+                            a, b, c, a, c, coupling_ac * 100.0, b
+                        ),
+                    ));
+                    break; // one signal per A→B edge is enough
+                }
+            }
         }
     }
 
@@ -240,6 +333,43 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     signals
 }
 
+/// Check if a pair of paths is a test file ↔ source file pair.
+fn is_test_source_pair(a: &str, b: &str) -> bool {
+    let a_is_test = is_test_file(a);
+    let b_is_test = is_test_file(b);
+    a_is_test != b_is_test
+}
+
+fn is_test_file(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    filename.starts_with("test_")
+        || filename.starts_with("tests_")
+        || filename.ends_with("_test.py")
+        || filename.ends_with(".test.ts")
+        || filename.ends_with(".test.js")
+        || filename.ends_with(".spec.ts")
+        || filename.ends_with(".spec.js")
+        || path.contains("/tests/")
+        || path.contains("/test/")
+        || path.starts_with("tests/")
+        || path.starts_with("test/")
+}
+
+/// Check if a path is a source code file (has a recognized source extension).
+/// Filters out directories, config files, docs, lock files, etc.
+fn is_source_file(path: &str) -> bool {
+    let source_extensions = [
+        ".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".java", ".rb", ".cpp", ".c", ".h",
+        ".cs", ".swift", ".kt", ".scala",
+    ];
+    source_extensions.iter().any(|ext| path.ends_with(ext))
+}
+
+fn is_reexport_module(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    filename == "__init__.py" || filename == "index.ts" || filename == "index.js"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,10 +382,10 @@ mod tests {
     #[test]
     fn test_ghost_coupling_detected() {
         let mut g = UnifiedGraph::new();
-        g.add_node(Node::module("a", "a.py"));
-        g.add_node(Node::module("b", "b.py"));
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
         // No structural edge, but high co-change
-        g.add_edge("a", "b", EdgeType::CoChanges, 0.8).unwrap();
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8).unwrap();
 
         let signals = detect_signals(&g, &default_config());
         assert!(signals
@@ -266,10 +396,10 @@ mod tests {
     #[test]
     fn test_no_ghost_coupling_when_structural_edge_exists() {
         let mut g = UnifiedGraph::new();
-        g.add_node(Node::module("a", "a.py"));
-        g.add_node(Node::module("b", "b.py"));
-        g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
-        g.add_edge("a", "b", EdgeType::CoChanges, 0.8).unwrap();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8).unwrap();
 
         let signals = detect_signals(&g, &default_config());
         assert!(!signals
@@ -294,12 +424,15 @@ mod tests {
     }
 
     #[test]
-    fn test_over_engineering_detected() {
+    fn test_over_engineering_single_consumer_wrapper() {
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
-        g.add_node(Node::module("b", "b.py"));
+        // b is a trivial single-consumer module: low complexity, never changes
+        let mut b_node = Node::module("b", "b.py");
+        b_node.complexity = Some(2);
+        g.add_node(b_node);
         g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
-        // No co-change edge → coupling is 0.0 (< 0.05 threshold)
+        // No co-change, b has fan-in=1 and low complexity → over-engineering
 
         let signals = detect_signals(&g, &default_config());
         assert!(signals
@@ -308,13 +441,55 @@ mod tests {
     }
 
     #[test]
-    fn test_signals_sorted_by_severity() {
+    fn test_no_over_engineering_for_stable_dependency() {
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
-        g.add_node(Node::module("b", "b.py"));
+        // b is used by multiple consumers — not a single-consumer wrapper
+        let mut b_node = Node::module("b", "b.py");
+        b_node.complexity = Some(20);
+        g.add_node(b_node);
         g.add_node(Node::module("c", "c.py"));
-        g.add_edge("a", "b", EdgeType::CoChanges, 0.6).unwrap();
-        g.add_edge("a", "c", EdgeType::CoChanges, 0.9).unwrap();
+        g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("c", "b", EdgeType::Imports, 1.0).unwrap();
+        // b has fan-in=2 — not a single-consumer wrapper
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(!signals
+            .iter()
+            .any(|s| s.signal_type == SignalType::OverEngineering));
+    }
+
+    #[test]
+    fn test_over_engineering_pass_through() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a", "a.py"));
+        // b is non-trivial (high complexity) so it doesn't match single-consumer wrapper
+        let mut b_node = Node::module("b", "b.py");
+        b_node.complexity = Some(30);
+        g.add_node(b_node);
+        g.add_node(Node::module("c", "c.py"));
+        // A→B→C import chain
+        g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("b", "c", EdgeType::Imports, 1.0).unwrap();
+        // A and C co-change heavily, but B is dormant
+        g.add_edge("a", "c", EdgeType::CoChanges, 0.8).unwrap();
+        // No A↔B or B↔C co-change
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(signals
+            .iter()
+            .any(|s| s.signal_type == SignalType::OverEngineering
+                && s.description.contains("Pass-through")));
+    }
+
+    #[test]
+    fn test_signals_sorted_by_severity() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_node(Node::module("c.py", "c.py"));
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.6).unwrap();
+        g.add_edge("a.py", "c.py", EdgeType::CoChanges, 0.9).unwrap();
 
         let signals = detect_signals(&g, &default_config());
         for w in signals.windows(2) {

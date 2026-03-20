@@ -9,13 +9,23 @@
 use gix::bstr::ByteSlice;
 use ising_core::config::Config;
 use ising_core::graph::{ChangeMetrics, EdgeType, Node, UnifiedGraph};
+use ising_core::ignore::IgnoreRules;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Check if a file path has a supported source code extension.
+fn is_source_file(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("py" | "ts" | "tsx" | "js" | "jsx")
+    )
+}
 
 /// Build the change graph from git history.
 pub fn build_change_graph(
     repo_path: &Path,
     config: &Config,
+    ignore: &IgnoreRules,
 ) -> Result<UnifiedGraph, anyhow::Error> {
     let mut graph = UnifiedGraph::new();
 
@@ -45,8 +55,11 @@ pub fn build_change_graph(
             Err(_) => break,
         };
 
-        // Get changed files by diffing against parent
-        let changed_files = get_changed_files(&repo, &commit)?;
+        // Get changed files by diffing against parent (only source code files, respecting .isingignore)
+        let changed_files: std::collections::HashSet<String> = get_changed_files(&repo, &commit)?
+            .into_iter()
+            .filter(|f| is_source_file(f) && !ignore.is_ignored(f))
+            .collect();
 
         if !changed_files.is_empty() {
             total_commits += 1;

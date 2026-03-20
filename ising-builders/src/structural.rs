@@ -9,6 +9,7 @@
 //! Parsing is parallelized with rayon.
 
 use ising_core::graph::{EdgeType, Node, UnifiedGraph};
+use ising_core::ignore::IgnoreRules;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -64,6 +65,7 @@ struct FunctionInfo {
     name: String,
     line_start: u32,
     line_end: u32,
+    complexity: u32,
 }
 
 #[derive(Debug)]
@@ -71,6 +73,7 @@ struct ClassInfo {
     name: String,
     line_start: u32,
     line_end: u32,
+    complexity: u32,
 }
 
 #[derive(Debug)]
@@ -80,8 +83,8 @@ struct ImportInfo {
 }
 
 /// Build the structural graph for all supported source files in a directory.
-pub fn build_structural_graph(repo_path: &Path) -> Result<UnifiedGraph, anyhow::Error> {
-    let source_files = walk_source_files(repo_path);
+pub fn build_structural_graph(repo_path: &Path, ignore: &IgnoreRules) -> Result<UnifiedGraph, anyhow::Error> {
+    let source_files = walk_source_files(repo_path, ignore);
 
     let file_results: Vec<FileAnalysis> = source_files
         .par_iter()
@@ -97,12 +100,16 @@ pub fn build_structural_graph(repo_path: &Path) -> Result<UnifiedGraph, anyhow::
         module_node.loc = Some(result.loc);
         graph.add_node(module_node);
 
-        // Add function nodes + contains edges
+        // Add function nodes + contains edges, track total complexity for module
+        let mut module_complexity: u32 = 0;
+
         for func in &result.functions {
             let func_id = format!("{}::{}", result.module_id, func.name);
             let mut func_node =
                 Node::function(&func_id, &result.file_path, func.line_start, func.line_end);
             func_node.language = Some(result.language.clone());
+            func_node.complexity = Some(func.complexity);
+            module_complexity += func.complexity;
             graph.add_node(func_node);
             let _ = graph.add_edge(&result.module_id, &func_id, EdgeType::Contains, 1.0);
         }
@@ -113,8 +120,17 @@ pub fn build_structural_graph(repo_path: &Path) -> Result<UnifiedGraph, anyhow::
             let mut class_node =
                 Node::class(&class_id, &result.file_path, class.line_start, class.line_end);
             class_node.language = Some(result.language.clone());
+            class_node.complexity = Some(class.complexity);
+            module_complexity += class.complexity;
             graph.add_node(class_node);
             let _ = graph.add_edge(&result.module_id, &class_id, EdgeType::Contains, 1.0);
+        }
+
+        // Set module-level complexity as sum of all function/class complexities
+        if module_complexity > 0 {
+            if let Some(module_node) = graph.get_node_mut(&result.module_id) {
+                module_node.complexity = Some(module_complexity);
+            }
         }
     }
 
@@ -136,7 +152,7 @@ pub fn build_structural_graph(repo_path: &Path) -> Result<UnifiedGraph, anyhow::
 }
 
 /// Walk the repository and collect all supported source files with their language.
-fn walk_source_files(repo_path: &Path) -> Vec<(PathBuf, Language)> {
+fn walk_source_files(repo_path: &Path, ignore: &IgnoreRules) -> Vec<(PathBuf, Language)> {
     WalkDir::new(repo_path)
         .into_iter()
         .filter_entry(|e| {
@@ -161,6 +177,11 @@ fn walk_source_files(repo_path: &Path) -> Vec<(PathBuf, Language)> {
         .filter_map(|e| {
             let ext = e.path().extension()?.to_str()?;
             let lang = Language::from_extension(ext)?;
+            let rel = e.path().strip_prefix(repo_path).ok()?;
+            let rel_str = rel.to_string_lossy();
+            if ignore.is_ignored(&rel_str) {
+                return None;
+            }
             Some((e.into_path(), lang))
         })
         .collect()
@@ -196,7 +217,7 @@ fn analyze_file(
         parser.set_language(&ts_lang)?;
         if let Some(tree) = parser.parse(&source, None) {
             let root = tree.root_node();
-            extract_nodes(root, &source, lang, &mut functions, &mut classes, &mut imports);
+            extract_nodes(root, &source, lang, &relative_path, &mut functions, &mut classes, &mut imports);
         }
     } else {
         // Fallback: just create the module node, no function/class extraction
@@ -219,12 +240,13 @@ fn extract_nodes(
     node: tree_sitter::Node<'_>,
     source: &str,
     lang: Language,
+    relative_path: &str,
     functions: &mut Vec<FunctionInfo>,
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
     match lang {
-        Language::Python => extract_python_nodes(node, source, functions, classes, imports),
+        Language::Python => extract_python_nodes(node, source, relative_path, functions, classes, imports),
         Language::TypeScript | Language::JavaScript => {
             extract_ts_nodes(node, source, functions, classes, imports);
         }
@@ -234,6 +256,7 @@ fn extract_nodes(
 fn extract_python_nodes(
     node: tree_sitter::Node<'_>,
     source: &str,
+    relative_path: &str,
     functions: &mut Vec<FunctionInfo>,
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
@@ -247,10 +270,12 @@ fn extract_python_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
+                    let complexity = compute_complexity(child, Language::Python);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
+                        complexity,
                     });
                 }
             }
@@ -260,10 +285,12 @@ fn extract_python_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
+                    let complexity = compute_complexity(child, Language::Python);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
+                        complexity,
                     });
                 }
             }
@@ -273,9 +300,9 @@ fn extract_python_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    // Convert Python dotted path to file path
-                    let path = module.replace('.', "/") + ".py";
-                    imports.push(ImportInfo { source: path });
+                    if let Some(path) = resolve_python_import(&module, relative_path) {
+                        imports.push(ImportInfo { source: path });
+                    }
                 }
             }
             "import_statement" => {
@@ -284,15 +311,44 @@ fn extract_python_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
-                    let path = module.replace('.', "/") + ".py";
-                    imports.push(ImportInfo { source: path });
+                    if let Some(path) = resolve_python_import(&module, relative_path) {
+                        imports.push(ImportInfo { source: path });
+                    }
                 }
             }
-            _ => {
-                // Recurse into nested nodes (but not into function/class bodies for top-level extraction)
-            }
+            _ => {}
         }
     }
+}
+
+/// Resolve a Python import to a relative file path.
+/// Handles relative imports (from .ctx import X) and absolute imports (import flask.ctx).
+fn resolve_python_import(module: &str, current_file: &str) -> Option<String> {
+    if module.is_empty() {
+        return None;
+    }
+
+    let dots = module.chars().take_while(|&c| c == '.').count();
+
+    if dots == 0 {
+        // Absolute import
+        return Some(module.replace('.', "/") + ".py");
+    }
+
+    // Relative import
+    let current_dir = Path::new(current_file).parent()?.to_string_lossy().to_string();
+    let mut base = PathBuf::from(&current_dir);
+    for _ in 0..(dots - 1) {
+        base = base.parent()?.to_path_buf();
+    }
+
+    let remainder = &module[dots..];
+    if remainder.is_empty() {
+        return Some(base.join("__init__.py").to_string_lossy().to_string());
+    }
+
+    let parts = remainder.replace('.', "/");
+    Some(base.join(&parts).to_string_lossy().to_string() + ".py")
 }
 
 fn extract_ts_nodes(
@@ -311,10 +367,12 @@ fn extract_ts_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
+                    let complexity = compute_complexity(child, Language::TypeScript);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
+                        complexity,
                     });
                 }
             }
@@ -324,10 +382,12 @@ fn extract_ts_nodes(
                         .utf8_text(source.as_bytes())
                         .unwrap_or("")
                         .to_string();
+                    let complexity = compute_complexity(child, Language::TypeScript);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
+                        complexity,
                     });
                 }
             }
@@ -349,6 +409,66 @@ fn extract_ts_nodes(
             _ => {}
         }
     }
+}
+
+/// Compute cyclomatic complexity by counting decision points in a Tree-sitter subtree.
+///
+/// Cyclomatic complexity = 1 + number of decision points.
+/// Decision points: if, elif/else if, for, while, try, except/catch,
+/// and, or, ternary/conditional expressions, case/match arms.
+fn compute_complexity(node: tree_sitter::Node<'_>, lang: Language) -> u32 {
+    let mut decisions = 0;
+    fn walk_decisions(node: tree_sitter::Node<'_>, decisions: &mut u32, lang: Language) {
+        let kind = node.kind();
+        match lang {
+            Language::Python => match kind {
+                "if_statement" | "elif_clause" | "for_statement" | "while_statement"
+                | "except_clause" | "with_statement" | "assert_statement" => {
+                    *decisions += 1;
+                }
+                "boolean_operator" => {
+                    // "and" / "or" each add a branch
+                    *decisions += 1;
+                }
+                "conditional_expression" => {
+                    // ternary: x if cond else y
+                    *decisions += 1;
+                }
+                "case_clause" => {
+                    // match/case arms (Python 3.10+)
+                    *decisions += 1;
+                }
+                _ => {}
+            },
+            Language::TypeScript | Language::JavaScript => match kind {
+                "if_statement" | "for_statement" | "for_in_statement" | "while_statement"
+                | "do_statement" | "catch_clause" | "switch_case" => {
+                    *decisions += 1;
+                }
+                "binary_expression" => {
+                    // Check for && or ||
+                    if let Some(op) = node.child_by_field_name("operator") {
+                        let op_text = op.kind();
+                        if op_text == "&&" || op_text == "||" {
+                            *decisions += 1;
+                        }
+                    }
+                }
+                "ternary_expression" => {
+                    *decisions += 1;
+                }
+                _ => {}
+            },
+        }
+
+        let mut child_cursor = node.walk();
+        for child in node.children(&mut child_cursor) {
+            walk_decisions(child, decisions, lang);
+        }
+    }
+
+    walk_decisions(node, &mut decisions, lang);
+    1 + decisions // base complexity of 1
 }
 
 /// Get the appropriate tree-sitter language grammar for a file.
@@ -387,7 +507,7 @@ mod tests {
         fs::write(dir.path().join("app.ts"), "console.log('hi')").unwrap();
         fs::write(dir.path().join("readme.md"), "# hello").unwrap();
 
-        let files = walk_source_files(dir.path());
+        let files = walk_source_files(dir.path(), &IgnoreRules::parse(""));
         assert_eq!(files.len(), 2);
     }
 
@@ -400,7 +520,7 @@ mod tests {
         fs::write(dir.path().join("node_modules/foo/index.js"), "x").unwrap();
         fs::write(dir.path().join("app.py"), "x").unwrap();
 
-        let files = walk_source_files(dir.path());
+        let files = walk_source_files(dir.path(), &IgnoreRules::parse(""));
         assert_eq!(files.len(), 1);
     }
 
@@ -431,7 +551,7 @@ def helper():
         )
         .unwrap();
 
-        let graph = build_structural_graph(dir.path()).unwrap();
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // 2 modules + 3 functions + 1 class = 6 nodes (methods inside class not top-level)
         assert!(
             graph.node_count() >= 5,
@@ -463,7 +583,7 @@ class AppService {
         )
         .unwrap();
 
-        let graph = build_structural_graph(dir.path()).unwrap();
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // 1 module + 1 function + 1 class = 3 nodes minimum
         assert!(
             graph.node_count() >= 3,
@@ -487,7 +607,7 @@ class AppService {
         )
         .unwrap();
 
-        let graph = build_structural_graph(dir.path()).unwrap();
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // Check that an import edge was created from main.py -> utils.py
         let _import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
         // Import resolution depends on path matching — "utils.py" must match

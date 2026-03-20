@@ -274,14 +274,30 @@ impl Database {
         }
     }
 
-    /// Query hotspots ranked by hotspot_score.
+    /// Query hotspots ranked by normalized(change_freq) × normalized(complexity).
+    /// Falls back to normalized(change_freq) when complexity is unavailable.
     pub fn get_hotspots(&self, top_n: usize) -> Result<Vec<(String, f64, u32, f64)>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT n.id, COALESCE(cm.hotspot_score, 0), COALESCE(n.complexity, 0), COALESCE(cm.change_freq, 0)
-             FROM nodes n
-             LEFT JOIN change_metrics cm ON n.id = cm.node_id
-             ORDER BY cm.hotspot_score DESC NULLS LAST
-             LIMIT ?1",
+            "WITH maxvals AS (
+                SELECT
+                    MAX(cm.change_freq) as max_freq,
+                    MAX(n.complexity) as max_complexity
+                FROM nodes n
+                LEFT JOIN change_metrics cm ON n.id = cm.node_id
+                WHERE cm.change_freq > 0
+            )
+            SELECT
+                n.id,
+                (CAST(cm.change_freq AS REAL) / m.max_freq)
+                    * (CAST(COALESCE(n.complexity, 1) AS REAL) / m.max_complexity) as score,
+                COALESCE(n.complexity, 0),
+                COALESCE(cm.change_freq, 0)
+            FROM nodes n
+            LEFT JOIN change_metrics cm ON n.id = cm.node_id
+            CROSS JOIN maxvals m
+            WHERE cm.change_freq > 0
+            ORDER BY score DESC
+            LIMIT ?1",
         )?;
         let rows = stmt
             .query_map(params![top_n as i64], |row| {
@@ -588,11 +604,16 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         let mut graph = UnifiedGraph::new();
-        graph.add_node(Node::module("a", "a.py"));
-        graph.add_node(Node::module("b", "b.py"));
+        let mut node_a = Node::module("a", "a.py");
+        node_a.complexity = Some(20);
+        let mut node_b = Node::module("b", "b.py");
+        node_b.complexity = Some(5);
+        graph.add_node(node_a);
+        graph.add_node(node_b);
         graph.change_metrics.insert(
             "a".to_string(),
             ChangeMetrics {
+                change_freq: 10,
                 hotspot_score: 0.9,
                 ..Default::default()
             },
@@ -600,6 +621,7 @@ mod tests {
         graph.change_metrics.insert(
             "b".to_string(),
             ChangeMetrics {
+                change_freq: 3,
                 hotspot_score: 0.3,
                 ..Default::default()
             },
@@ -608,6 +630,9 @@ mod tests {
 
         let hotspots = db.get_hotspots(10).unwrap();
         assert_eq!(hotspots.len(), 2);
+        // "a" has highest score: (10/10) * (20/20) = 1.0
         assert_eq!(hotspots[0].0, "a");
+        // "b" has lower score: (3/10) * (5/20) = 0.075
+        assert_eq!(hotspots[1].0, "b");
     }
 }
