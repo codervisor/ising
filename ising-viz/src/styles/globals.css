@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Signal pulse animation */
+@keyframes pulse-ring {
+  0% {
+    stroke-opacity: 1;
+    stroke-width: 3;
+  }
+  50% {
+    stroke-opacity: 0.4;
+    stroke-width: 5;
+  }
+  100% {
+    stroke-opacity: 1;
+    stroke-width: 3;
+  }
+}
+
+.signal-pulse {
+  animation: pulse-ring 2s ease-in-out infinite;
+}
+
+/* Edge glow for fragile boundaries */
+@keyframes edge-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 2px #ef4444);
+  }
+  50% {
+    filter: drop-shadow(0 0 6px #ef4444);
+  }
+}
+
+.edge-glow {
+  animation: edge-glow 2s ease-in-out infinite;
+}

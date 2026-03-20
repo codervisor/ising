@@ -1,3 +1,4 @@
 # pnpm workspace definition
 packages:
   - 'packages/*'
+  - 'ising-viz'

@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "repo": "example/fastapi-app",
+    "commit": "abc1234",
+    "built_at": "2026-03-20T00:00:00Z",
+    "time_window": "6 months ago",
+    "file_count": 12,
+    "signal_count": 5
+  },
+  "nodes": [
+    { "id": "src/auth/login.py", "type": "module", "module": "auth", "language": "Python", "loc": 380, "complexity": 25, "nesting_depth": 4, "fan_in": 3, "fan_out": 5, "change_freq": 45, "churn_rate": 2.1, "hotspot": 0.92, "bug_count": 4, "fix_inducing_rate": 0.12, "defect_density": 0.011, "sum_coupling": 3.2, "last_changed": "2026-03-15T00:00:00Z" },
+    { "id": "src/auth/token.py", "type": "module", "module": "auth", "language": "Python", "loc": 150, "complexity": 12, "nesting_depth": 2, "fan_in": 5, "fan_out": 2, "change_freq": 30, "churn_rate": 1.5, "hotspot": 0.71, "bug_count": 2, "fix_inducing_rate": 0.08, "defect_density": 0.013, "sum_coupling": 2.1, "last_changed": "2026-03-10T00:00:00Z" },
+    { "id": "src/auth/middleware.py", "type": "module", "module": "auth", "language": "Python", "loc": 90, "complexity": 8, "nesting_depth": 2, "fan_in": 2, "fan_out": 3, "change_freq": 15, "churn_rate": 0.8, "hotspot": 0.35, "bug_count": 1, "fix_inducing_rate": 0.05, "defect_density": 0.011, "sum_coupling": 1.0, "last_changed": "2026-02-20T00:00:00Z" },
+    { "id": "src/api/routes.py", "type": "module", "module": "api", "language": "Python", "loc": 520, "complexity": 30, "nesting_depth": 3, "fan_in": 1, "fan_out": 8, "change_freq": 60, "churn_rate": 2.8, "hotspot": 0.88, "bug_count": 6, "fix_inducing_rate": 0.15, "defect_density": 0.012, "sum_coupling": 4.5, "last_changed": "2026-03-18T00:00:00Z" },
+    { "id": "src/api/schemas.py", "type": "module", "module": "api", "language": "Python", "loc": 200, "complexity": 5, "nesting_depth": 1, "fan_in": 4, "fan_out": 1, "change_freq": 20, "churn_rate": 0.6, "hotspot": 0.22, "bug_count": 0, "fix_inducing_rate": 0.0, "defect_density": 0.0, "sum_coupling": 0.8, "last_changed": "2026-01-15T00:00:00Z" },
+    { "id": "src/api/deps.py", "type": "module", "module": "api", "language": "Python", "loc": 60, "complexity": 3, "nesting_depth": 1, "fan_in": 6, "fan_out": 2, "change_freq": 8, "churn_rate": 0.3, "hotspot": 0.10, "bug_count": 0, "fix_inducing_rate": 0.0, "defect_density": 0.0, "sum_coupling": 0.5, "last_changed": "2025-12-01T00:00:00Z" },
+    { "id": "src/db/models.py", "type": "module", "module": "db", "language": "Python", "loc": 300, "complexity": 15, "nesting_depth": 2, "fan_in": 7, "fan_out": 1, "change_freq": 25, "churn_rate": 1.0, "hotspot": 0.45, "bug_count": 1, "fix_inducing_rate": 0.03, "defect_density": 0.003, "sum_coupling": 1.8, "last_changed": "2026-02-28T00:00:00Z" },
+    { "id": "src/db/session.py", "type": "module", "module": "db", "language": "Python", "loc": 80, "complexity": 4, "nesting_depth": 1, "fan_in": 5, "fan_out": 1, "change_freq": 5, "churn_rate": 0.2, "hotspot": 0.05, "bug_count": 0, "fix_inducing_rate": 0.0, "defect_density": 0.0, "sum_coupling": 0.3, "last_changed": "2025-11-01T00:00:00Z" },
+    { "id": "src/events/handlers.py", "type": "module", "module": "events", "language": "Python", "loc": 180, "complexity": 18, "nesting_depth": 3, "fan_in": 2, "fan_out": 4, "change_freq": 35, "churn_rate": 1.8, "hotspot": 0.65, "bug_count": 3, "fix_inducing_rate": 0.10, "defect_density": 0.017, "sum_coupling": 2.5, "last_changed": "2026-03-12T00:00:00Z" },
+    { "id": "src/events/bus.py", "type": "module", "module": "events", "language": "Python", "loc": 100, "complexity": 6, "nesting_depth": 2, "fan_in": 3, "fan_out": 2, "change_freq": 12, "churn_rate": 0.5, "hotspot": 0.18, "bug_count": 0, "fix_inducing_rate": 0.0, "defect_density": 0.0, "sum_coupling": 0.7, "last_changed": "2026-01-20T00:00:00Z" },
+    { "id": "src/utils/helpers.py", "type": "module", "module": "utils", "language": "Python", "loc": 250, "complexity": 10, "nesting_depth": 2, "fan_in": 8, "fan_out": 0, "change_freq": 10, "churn_rate": 0.4, "hotspot": 0.12, "bug_count": 0, "fix_inducing_rate": 0.0, "defect_density": 0.0, "sum_coupling": 0.2, "last_changed": "2025-10-15T00:00:00Z" },
+    { "id": "src/config.py", "type": "module", "module": "root", "language": "Python", "loc": 45, "complexity": 2, "nesting_depth": 1, "fan_in": 10, "fan_out": 0, "change_freq": 3, "churn_rate": 0.1, "hotspot": 0.02, "bug_count": 0, "fix_inducing_rate": 0.0, "defect_density": 0.0, "sum_coupling": 0.1, "last_changed": "2025-09-01T00:00:00Z" }
+  ],
+  "edges": [
+    { "source": "src/auth/login.py", "target": "src/auth/token.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/auth/login.py", "target": "src/db/models.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/auth/login.py", "target": "src/events/bus.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/api/routes.py", "target": "src/auth/login.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/api/routes.py", "target": "src/api/schemas.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/api/routes.py", "target": "src/api/deps.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/api/routes.py", "target": "src/db/models.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/events/handlers.py", "target": "src/events/bus.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/events/handlers.py", "target": "src/db/models.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/auth/middleware.py", "target": "src/auth/token.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+    { "source": "src/db/models.py", "target": "src/db/session.py", "layer": "structural", "type": "imports", "weight": 1.0, "metadata": null },
+
+    { "source": "src/auth/login.py", "target": "src/auth/token.py", "layer": "change", "type": "co_changes", "weight": 0.82, "metadata": null },
+    { "source": "src/auth/login.py", "target": "src/api/routes.py", "layer": "change", "type": "co_changes", "weight": 0.65, "metadata": null },
+    { "source": "src/api/routes.py", "target": "src/api/schemas.py", "layer": "change", "type": "co_changes", "weight": 0.55, "metadata": null },
+    { "source": "src/events/handlers.py", "target": "src/auth/login.py", "layer": "change", "type": "co_changes", "weight": 0.72, "metadata": null },
+    { "source": "src/db/models.py", "target": "src/api/schemas.py", "layer": "change", "type": "co_changes", "weight": 0.40, "metadata": null },
+
+    { "source": "src/auth/login.py", "target": "src/auth/token.py", "layer": "defect", "type": "fault_propagates", "weight": 0.18, "metadata": null },
+    { "source": "src/api/routes.py", "target": "src/auth/login.py", "layer": "defect", "type": "fault_propagates", "weight": 0.22, "metadata": null }
+  ],
+  "signals": [
+    { "type": "fragile_boundary", "node_a": "src/auth/login.py", "node_b": "src/auth/token.py", "severity": 0.92, "detail": "Structural dep + co-change 0.82 + fault propagation 0.18. Token validation tightly coupled to login flow.", "evidence": null },
+    { "type": "ghost_coupling", "node_a": "src/events/handlers.py", "node_b": "src/auth/login.py", "severity": 0.78, "detail": "No structural dependency but 72% co-change rate. Hidden coupling through event system.", "evidence": null },
+    { "type": "ticking_bomb", "node_a": "src/api/routes.py", "node_b": null, "severity": 0.88, "detail": "Top hotspot (0.88) + 6 bugs + high coupling (4.5). Primary risk concentration point.", "evidence": null },
+    { "type": "ticking_bomb", "node_a": "src/auth/login.py", "node_b": null, "severity": 0.85, "detail": "Second highest hotspot (0.92) + 4 bugs + temporal coupling to 3 files.", "evidence": null },
+    { "type": "stable_core", "node_a": "src/config.py", "node_b": null, "severity": 0.15, "detail": "High fan-in (10), low change freq (3), zero bugs. Stable foundation module.", "evidence": null }
+  ]
+}
