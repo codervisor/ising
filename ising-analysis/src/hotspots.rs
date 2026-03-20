@@ -44,30 +44,27 @@ pub fn rank_hotspots(graph: &UnifiedGraph, top_n: usize) -> Vec<Hotspot> {
         .collect();
 
     let max_freq = raw.iter().map(|r| r.2).max().unwrap_or(1).max(1) as f64;
-    let max_complexity = raw
-        .iter()
-        .filter_map(|r| r.3)
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
+    let max_complexity = raw.iter().filter_map(|r| r.3).max().unwrap_or(1).max(1) as f64;
 
     let mut hotspots: Vec<Hotspot> = raw
         .drain(..)
-        .map(|(node_id, file_path, change_freq, complexity, churn_rate)| {
-            let norm_freq = change_freq as f64 / max_freq;
-            let c = complexity.unwrap_or(1).max(1);
-            let norm_complexity = c as f64 / max_complexity;
-            let hotspot_score = norm_freq * norm_complexity;
+        .map(
+            |(node_id, file_path, change_freq, complexity, churn_rate)| {
+                let norm_freq = change_freq as f64 / max_freq;
+                let c = complexity.unwrap_or(1).max(1);
+                let norm_complexity = c as f64 / max_complexity;
+                let hotspot_score = norm_freq * norm_complexity;
 
-            Hotspot {
-                node_id,
-                file_path,
-                hotspot_score,
-                change_freq,
-                complexity,
-                churn_rate,
-            }
-        })
+                Hotspot {
+                    node_id,
+                    file_path,
+                    hotspot_score,
+                    change_freq,
+                    complexity,
+                    churn_rate,
+                }
+            },
+        )
         .collect();
 
     hotspots.sort_by(|a, b| {

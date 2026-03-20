@@ -5,7 +5,7 @@
 
 use ising_core::graph::{EdgeType, Node, NodeType, UnifiedGraph};
 use protobuf::Message;
-use scip::types::{self, symbol_information, SymbolRole};
+use scip::types::{self, SymbolRole, symbol_information};
 use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
@@ -65,7 +65,10 @@ impl Range {
     }
 
     fn span_size(&self) -> (i32, i32) {
-        (self.end_line - self.start_line, self.end_char - self.start_char)
+        (
+            self.end_line - self.start_line,
+            self.end_char - self.start_char,
+        )
     }
 }
 

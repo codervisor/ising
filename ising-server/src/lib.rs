@@ -45,9 +45,7 @@ struct ToolDefinition {
 /// Start the MCP server.
 pub async fn serve(db_path: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open(db_path)?;
-    let state = Arc::new(AppState {
-        db: Mutex::new(db),
-    });
+    let state = Arc::new(AppState { db: Mutex::new(db) });
 
     let app = Router::new()
         .route("/tools", get(list_tools))
@@ -88,8 +86,8 @@ async fn impact_handler(
     let impact = db
         .get_impact(&query.target)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let json = serde_json::to_value(&impact)
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let json =
+        serde_json::to_value(&impact).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json))
 }
 

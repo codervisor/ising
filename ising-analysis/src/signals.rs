@@ -80,9 +80,11 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
 
         // Ghost Coupling: no structural dep but high temporal coupling
         // Skip test↔source pairs and non-source-file pairs (directories, configs)
-        if !has_structural && *coupling > thresholds.ghost_coupling_threshold
+        if !has_structural
+            && *coupling > thresholds.ghost_coupling_threshold
             && !is_test_source_pair(a, b)
-            && is_source_file(a) && is_source_file(b)
+            && is_source_file(a)
+            && is_source_file(b)
         {
             signals.push(Signal::new(
                 SignalType::GhostCoupling,
@@ -165,9 +167,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             continue;
         }
 
-        let coupling_ab = graph
-            .edge_weight(a, b, &EdgeType::CoChanges)
-            .unwrap_or(0.0);
+        let coupling_ab = graph.edge_weight(a, b, &EdgeType::CoChanges).unwrap_or(0.0);
 
         // Skip if they do co-change — the dependency is actively used
         if coupling_ab >= thresholds.over_engineering_coupling {
@@ -180,10 +180,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             .get(*b)
             .map(|m| m.change_freq)
             .unwrap_or(0);
-        let b_complexity = graph
-            .get_node(b)
-            .and_then(|n| n.complexity)
-            .unwrap_or(0);
+        let b_complexity = graph.get_node(b).and_then(|n| n.complexity).unwrap_or(0);
 
         // Signal 1: Single-consumer wrapper
         // B has exactly one consumer (A), B is low-complexity, and B rarely changes
@@ -205,12 +202,8 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         // A→B→C where A↔C co-change but A↔B and B↔C don't
         if let Some(b_targets) = import_targets.get(b) {
             for c in b_targets {
-                let coupling_ac = graph
-                    .edge_weight(a, c, &EdgeType::CoChanges)
-                    .unwrap_or(0.0);
-                let coupling_bc = graph
-                    .edge_weight(b, c, &EdgeType::CoChanges)
-                    .unwrap_or(0.0);
+                let coupling_ac = graph.edge_weight(a, c, &EdgeType::CoChanges).unwrap_or(0.0);
+                let coupling_bc = graph.edge_weight(b, c, &EdgeType::CoChanges).unwrap_or(0.0);
 
                 if coupling_ac > thresholds.ghost_coupling_threshold
                     && coupling_bc < thresholds.over_engineering_coupling
@@ -237,7 +230,12 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
 
     let mut change_freqs: Vec<f64> = node_ids
         .iter()
-        .filter_map(|id| graph.change_metrics.get(id.as_str()).map(|m| m.change_freq as f64))
+        .filter_map(|id| {
+            graph
+                .change_metrics
+                .get(id.as_str())
+                .map(|m| m.change_freq as f64)
+        })
         .collect();
 
     let mut fan_ins: Vec<f64> = node_ids
@@ -278,7 +276,10 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     let freq_p_low = percentile(&mut change_freqs, config.percentiles.stable_core_freq);
     let fan_in_p_high = percentile(&mut fan_ins, config.percentiles.stable_core_fan_in);
     let hotspot_p_high = percentile(&mut hotspots, config.percentiles.ticking_bomb_hotspot);
-    let defect_p_high = percentile(&mut defect_densities, config.percentiles.ticking_bomb_defect);
+    let defect_p_high = percentile(
+        &mut defect_densities,
+        config.percentiles.ticking_bomb_defect,
+    );
     let coupling_p_high = percentile(&mut sum_couplings, config.percentiles.ticking_bomb_coupling);
 
     for node_id in &node_ids {
@@ -294,8 +295,12 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
 
         // Stable Core: low change freq + high fan-in + low defects
         // Skip test files and documentation examples — not meaningful as "core"
-        if freq > 0.0 && freq <= freq_p_low && fan_in >= fan_in_p_high && fan_in_p_high > 0.0
-            && !is_test_file(node_id) && !is_docs_example(node_id)
+        if freq > 0.0
+            && freq <= freq_p_low
+            && fan_in >= fan_in_p_high
+            && fan_in_p_high > 0.0
+            && !is_test_file(node_id)
+            && !is_docs_example(node_id)
         {
             signals.push(Signal::new(
                 SignalType::StableCore,
@@ -404,12 +409,15 @@ mod tests {
         g.add_node(Node::module("a.py", "a.py"));
         g.add_node(Node::module("b.py", "b.py"));
         // No structural edge, but high co-change
-        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8).unwrap();
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
+            .unwrap();
 
         let signals = detect_signals(&g, &default_config());
-        assert!(signals
-            .iter()
-            .any(|s| s.signal_type == SignalType::GhostCoupling));
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling)
+        );
     }
 
     #[test]
@@ -418,12 +426,15 @@ mod tests {
         g.add_node(Node::module("a.py", "a.py"));
         g.add_node(Node::module("b.py", "b.py"));
         g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
-        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8).unwrap();
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
+            .unwrap();
 
         let signals = detect_signals(&g, &default_config());
-        assert!(!signals
-            .iter()
-            .any(|s| s.signal_type == SignalType::GhostCoupling));
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling)
+        );
     }
 
     #[test]
@@ -437,9 +448,11 @@ mod tests {
             .unwrap();
 
         let signals = detect_signals(&g, &default_config());
-        assert!(signals
-            .iter()
-            .any(|s| s.signal_type == SignalType::FragileBoundary));
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::FragileBoundary)
+        );
     }
 
     #[test]
@@ -454,9 +467,11 @@ mod tests {
         // No co-change, b has fan-in=1 and low complexity → over-engineering
 
         let signals = detect_signals(&g, &default_config());
-        assert!(signals
-            .iter()
-            .any(|s| s.signal_type == SignalType::OverEngineering));
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OverEngineering)
+        );
     }
 
     #[test]
@@ -473,9 +488,11 @@ mod tests {
         // b has fan-in=2 — not a single-consumer wrapper
 
         let signals = detect_signals(&g, &default_config());
-        assert!(!signals
-            .iter()
-            .any(|s| s.signal_type == SignalType::OverEngineering));
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OverEngineering)
+        );
     }
 
     #[test]
@@ -495,10 +512,12 @@ mod tests {
         // No A↔B or B↔C co-change
 
         let signals = detect_signals(&g, &default_config());
-        assert!(signals
-            .iter()
-            .any(|s| s.signal_type == SignalType::OverEngineering
-                && s.description.contains("Pass-through")));
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OverEngineering
+                    && s.description.contains("Pass-through"))
+        );
     }
 
     #[test]
@@ -507,8 +526,10 @@ mod tests {
         g.add_node(Node::module("a.py", "a.py"));
         g.add_node(Node::module("b.py", "b.py"));
         g.add_node(Node::module("c.py", "c.py"));
-        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.6).unwrap();
-        g.add_edge("a.py", "c.py", EdgeType::CoChanges, 0.9).unwrap();
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.6)
+            .unwrap();
+        g.add_edge("a.py", "c.py", EdgeType::CoChanges, 0.9)
+            .unwrap();
 
         let signals = detect_signals(&g, &default_config());
         for w in signals.windows(2) {

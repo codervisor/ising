@@ -96,25 +96,23 @@ pub fn build_change_graph(
         // Apply time window filter
         if let Some(cutoff) = cutoff_timestamp {
             let commit_time = commit.time().ok().map(|t| t.seconds);
-            if let Some(ct) = commit_time {
-                if ct < cutoff {
-                    skipped_old += 1;
-                    // Once we've hit commits older than the window, stop entirely
-                    // (first-parent chain is roughly chronological)
-                    if skipped_old > 100 {
-                        tracing::info!(
-                            "Stopping traversal: consistently outside time window"
-                        );
-                        break;
+            if let Some(ct) = commit_time
+                && ct < cutoff
+            {
+                skipped_old += 1;
+                // Once we've hit commits older than the window, stop entirely
+                // (first-parent chain is roughly chronological)
+                if skipped_old > 100 {
+                    tracing::info!("Stopping traversal: consistently outside time window");
+                    break;
+                }
+                // Move to first parent and continue (some commits may be out of order)
+                match commit.parent_ids().next() {
+                    Some(parent_id) => {
+                        commit_id = parent_id.detach();
+                        continue;
                     }
-                    // Move to first parent and continue (some commits may be out of order)
-                    match commit.parent_ids().next() {
-                        Some(parent_id) => {
-                            commit_id = parent_id.detach();
-                            continue;
-                        }
-                        None => break,
-                    }
+                    None => break,
                 }
             }
             // Reset consecutive old counter when we find an in-window commit
@@ -177,14 +175,16 @@ pub fn build_change_graph(
     let mut file_cochange_index: HashMap<&str, Vec<(&str, &str, u32)>> = HashMap::new();
     for ((a, b), count) in &co_changes {
         if *count >= min_co_changes {
-            file_cochange_index
-                .entry(a.as_str())
-                .or_default()
-                .push((a.as_str(), b.as_str(), *count));
-            file_cochange_index
-                .entry(b.as_str())
-                .or_default()
-                .push((a.as_str(), b.as_str(), *count));
+            file_cochange_index.entry(a.as_str()).or_default().push((
+                a.as_str(),
+                b.as_str(),
+                *count,
+            ));
+            file_cochange_index.entry(b.as_str()).or_default().push((
+                a.as_str(),
+                b.as_str(),
+                *count,
+            ));
         }
     }
 
@@ -266,14 +266,12 @@ fn get_changed_files(
 
     match parent_tree {
         Some(ptree) => {
-            ptree
-                .changes()?
-                .for_each_to_obtain_tree(&tree, |change| {
-                    if let Ok(path) = change.location().to_str() {
-                        changed.insert(path.to_string());
-                    }
-                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
-                })?;
+            ptree.changes()?.for_each_to_obtain_tree(&tree, |change| {
+                if let Ok(path) = change.location().to_str() {
+                    changed.insert(path.to_string());
+                }
+                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
+            })?;
         }
         None => {
             // Root commit: diff empty tree → commit tree
