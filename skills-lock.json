@@ -1,10 +1,20 @@
 {
   "version": 1,
   "skills": {
+    "git-commit": {
+      "source": "codervisor/forge",
+      "sourceType": "github",
+      "computedHash": "4eccd3246876e25078051013c1183932ee68f6e639937e1d4569ec35f587304e"
+    },
     "leanspec-sdd": {
       "source": "codervisor/lean-spec",
       "sourceType": "github",
       "computedHash": "8e1f03d7c6df30fede09b8ab23b75525002af5140549bcf12ad5ace84e959bfe"
+    },
+    "parallel-worktrees": {
+      "source": "codervisor/forge",
+      "sourceType": "github",
+      "computedHash": "1848a67829d211a61b007f18d6f91690816c140b738b00265cd2f8fe46a556c6"
     }
   }
 }
