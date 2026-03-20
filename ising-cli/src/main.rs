@@ -131,6 +131,7 @@ enum ExportFormat {
     Json,
     Dot,
     Mermaid,
+    VizJson,
 }
 
 fn main() {
@@ -394,6 +395,10 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
         }
         ExportFormat::Dot => generate_dot(&db)?,
         ExportFormat::Mermaid => generate_mermaid(&db)?,
+        ExportFormat::VizJson => {
+            let viz = db.get_viz_export()?;
+            serde_json::to_string_pretty(&viz)?
+        }
     };
 
     if let Some(path) = args.output {
