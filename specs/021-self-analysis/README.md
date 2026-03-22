@@ -18,6 +18,8 @@ depends_on:
 
 > **Status**: complete · **Priority**: high · **Created**: 2026-03-22
 
+**See also:** [SELF_ANALYSIS.md](./SELF_ANALYSIS.md) — raw analysis report with hotspot tables, mermaid graph, and recommendations.
+
 ## Overview
 
 Ising was run against **its own repository** as a bootstrapping validation exercise. Where spec 011 validated the signal engine on an external project (FastAPI), this spec turns the tool inward to discover what Ising can and cannot see about itself. The results reveal fundamental gaps in language coverage and threshold calibration that directly inform the roadmap.
