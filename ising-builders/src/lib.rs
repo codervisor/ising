@@ -6,6 +6,8 @@
 //!   and compute temporal coupling, hotspots, and churn metrics.
 
 pub mod change;
+pub mod common;
+pub mod languages;
 pub mod structural;
 
 use ising_core::config::Config;

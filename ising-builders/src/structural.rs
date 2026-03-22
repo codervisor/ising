@@ -6,84 +6,16 @@
 //! - Import edges between modules
 //! - Contains edges (module → function/class)
 //!
+//! Per-language extraction is delegated to the `languages` module.
 //! Parsing is parallelized with rayon.
 
+use crate::common::Language;
+use crate::languages::{self, FileAnalysis};
 use ising_core::graph::{EdgeType, Node, UnifiedGraph};
 use ising_core::ignore::IgnoreRules;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-
-/// Supported languages for structural analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    Python,
-    TypeScript,
-    JavaScript,
-    Rust,
-}
-
-impl Language {
-    fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "py" => Some(Language::Python),
-            "ts" | "tsx" => Some(Language::TypeScript),
-            "js" | "jsx" => Some(Language::JavaScript),
-            "rs" => Some(Language::Rust),
-            _ => None,
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Language::Python => "python",
-            Language::TypeScript => "typescript",
-            Language::JavaScript => "javascript",
-            Language::Rust => "rust",
-        }
-    }
-}
-
-/// Result of analyzing a single file.
-#[derive(Debug)]
-struct FileAnalysis {
-    /// Module node ID (file path).
-    module_id: String,
-    /// File path.
-    file_path: String,
-    /// Language detected.
-    language: String,
-    /// Lines of code in the file.
-    loc: u32,
-    /// Functions found in the file.
-    functions: Vec<FunctionInfo>,
-    /// Classes found in the file.
-    classes: Vec<ClassInfo>,
-    /// Imports found in the file.
-    imports: Vec<ImportInfo>,
-}
-
-#[derive(Debug)]
-struct FunctionInfo {
-    name: String,
-    line_start: u32,
-    line_end: u32,
-    complexity: u32,
-}
-
-#[derive(Debug)]
-struct ClassInfo {
-    name: String,
-    line_start: u32,
-    line_end: u32,
-    complexity: u32,
-}
-
-#[derive(Debug)]
-struct ImportInfo {
-    /// The module being imported from (resolved to a relative path if possible).
-    source: String,
-}
 
 /// Build the structural graph for all supported source files in a directory.
 pub fn build_structural_graph(
@@ -221,29 +153,46 @@ fn analyze_file(
     let mut classes = Vec::new();
     let mut imports = Vec::new();
 
-    // Use Tree-sitter to parse
     let mut parser = tree_sitter::Parser::new();
-
-    // We use the tree-sitter query approach: parse source, then walk the tree
-    // to find function/class/import nodes based on language
     let tree_sitter_lang = get_tree_sitter_language(lang, file_path);
 
     if let Some(ts_lang) = tree_sitter_lang {
         parser.set_language(&ts_lang)?;
         if let Some(tree) = parser.parse(&source, None) {
             let root = tree.root_node();
-            extract_nodes(
-                root,
-                &source,
-                lang,
-                &relative_path,
-                &mut functions,
-                &mut classes,
-                &mut imports,
-            );
+            match lang {
+                Language::Python => {
+                    languages::python::extract_nodes(
+                        root,
+                        &source,
+                        &relative_path,
+                        &mut functions,
+                        &mut classes,
+                        &mut imports,
+                    );
+                }
+                Language::TypeScript | Language::JavaScript => {
+                    languages::typescript::extract_nodes(
+                        root,
+                        &source,
+                        &mut functions,
+                        &mut classes,
+                        &mut imports,
+                    );
+                }
+                Language::Rust => {
+                    languages::rust_lang::extract_nodes(
+                        root,
+                        &source,
+                        &relative_path,
+                        &mut functions,
+                        &mut classes,
+                        &mut imports,
+                    );
+                }
+            }
         }
     } else {
-        // Fallback: just create the module node, no function/class extraction
         tracing::debug!(
             "No tree-sitter grammar for {}, using basic analysis",
             lang.name()
@@ -259,485 +208,6 @@ fn analyze_file(
         classes,
         imports,
     })
-}
-
-/// Extract function definitions, class definitions, and imports from a tree-sitter tree.
-fn extract_nodes(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    lang: Language,
-    relative_path: &str,
-    functions: &mut Vec<FunctionInfo>,
-    classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
-) {
-    match lang {
-        Language::Python => {
-            extract_python_nodes(node, source, relative_path, functions, classes, imports)
-        }
-        Language::TypeScript | Language::JavaScript => {
-            extract_ts_nodes(node, source, functions, classes, imports);
-        }
-        Language::Rust => {
-            extract_rust_nodes(node, source, relative_path, functions, classes, imports);
-        }
-    }
-}
-
-fn extract_python_nodes(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    relative_path: &str,
-    functions: &mut Vec<FunctionInfo>,
-    classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
-) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "function_definition" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::Python);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "class_definition" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::Python);
-                    classes.push(ClassInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "import_from_statement" => {
-                if let Some(module_node) = child.child_by_field_name("module_name") {
-                    let module = module_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    if let Some(path) = resolve_python_import(&module, relative_path) {
-                        imports.push(ImportInfo { source: path });
-                    }
-                    // Also try resolving imported names as submodules
-                    // e.g., "from fastapi import params" → fastapi/params.py
-                    let mut name_cursor = child.walk();
-                    for name_child in child.children(&mut name_cursor) {
-                        if name_child.kind() == "dotted_name" || name_child.kind() == "identifier" {
-                            // Skip the module_name node itself
-                            if Some(name_child.id())
-                                == child.child_by_field_name("module_name").map(|n| n.id())
-                            {
-                                continue;
-                            }
-                            let name = name_child
-                                .utf8_text(source.as_bytes())
-                                .unwrap_or("")
-                                .to_string();
-                            if !name.is_empty() {
-                                let submodule = format!("{}.{}", module, name);
-                                if let Some(path) = resolve_python_import(&submodule, relative_path)
-                                {
-                                    imports.push(ImportInfo { source: path });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "import_statement" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let module = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    if let Some(path) = resolve_python_import(&module, relative_path) {
-                        imports.push(ImportInfo { source: path });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Resolve a Python import to a relative file path.
-/// Handles relative imports (from .ctx import X) and absolute imports (import flask.ctx).
-fn resolve_python_import(module: &str, current_file: &str) -> Option<String> {
-    if module.is_empty() {
-        return None;
-    }
-
-    let dots = module.chars().take_while(|&c| c == '.').count();
-
-    if dots == 0 {
-        // Absolute import
-        return Some(module.replace('.', "/") + ".py");
-    }
-
-    // Relative import
-    let current_dir = Path::new(current_file)
-        .parent()?
-        .to_string_lossy()
-        .to_string();
-    let mut base = PathBuf::from(&current_dir);
-    for _ in 0..(dots - 1) {
-        base = base.parent()?.to_path_buf();
-    }
-
-    let remainder = &module[dots..];
-    if remainder.is_empty() {
-        return Some(base.join("__init__.py").to_string_lossy().to_string());
-    }
-
-    let parts = remainder.replace('.', "/");
-    Some(base.join(&parts).to_string_lossy().to_string() + ".py")
-}
-
-fn extract_ts_nodes(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    functions: &mut Vec<FunctionInfo>,
-    classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
-) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "function_declaration" | "method_definition" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::TypeScript);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "class_declaration" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::TypeScript);
-                    classes.push(ClassInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "import_statement" => {
-                // Extract the import source string
-                if let Some(source_node) = child.child_by_field_name("source") {
-                    let import_path = source_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .trim_matches(|c| c == '\'' || c == '"')
-                        .to_string();
-                    if import_path.starts_with('.') {
-                        // Relative import — normalize to a path
-                        let normalized = import_path.trim_start_matches("./").to_string();
-                        imports.push(ImportInfo { source: normalized });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn extract_rust_nodes(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    relative_path: &str,
-    functions: &mut Vec<FunctionInfo>,
-    classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
-) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "function_item" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::Rust);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "struct_item" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::Rust);
-                    classes.push(ClassInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "enum_item" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::Rust);
-                    classes.push(ClassInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "trait_item" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child, Language::Rust);
-                    classes.push(ClassInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                    });
-                }
-            }
-            "impl_item" => {
-                // Extract the impl type name
-                let impl_type = child
-                    .child_by_field_name("type")
-                    .and_then(|t| t.utf8_text(source.as_bytes()).ok())
-                    .unwrap_or("")
-                    .to_string();
-
-                // Walk impl body for method definitions
-                if let Some(body) = child.child_by_field_name("body") {
-                    let mut body_cursor = body.walk();
-                    for item in body.children(&mut body_cursor) {
-                        if item.kind() == "function_item"
-                            && let Some(name_node) = item.child_by_field_name("name")
-                        {
-                            let method_name = name_node
-                                .utf8_text(source.as_bytes())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = if impl_type.is_empty() {
-                                method_name
-                            } else {
-                                format!("{}::{}", impl_type, method_name)
-                            };
-                            let complexity = compute_complexity(item, Language::Rust);
-                            functions.push(FunctionInfo {
-                                name,
-                                line_start: item.start_position().row as u32 + 1,
-                                line_end: item.end_position().row as u32 + 1,
-                                complexity,
-                            });
-                        }
-                    }
-                }
-            }
-            "use_declaration" => {
-                // Extract the full use path text
-                let use_text = child.utf8_text(source.as_bytes()).unwrap_or("").to_string();
-                if let Some(path) = resolve_rust_use_import(&use_text, relative_path) {
-                    imports.push(ImportInfo { source: path });
-                }
-            }
-            "mod_item" => {
-                // Only handle `mod foo;` (no body) — file-referencing module declarations
-                let has_body = child.child_by_field_name("body").is_some();
-                if !has_body && let Some(name_node) = child.child_by_field_name("name") {
-                    let mod_name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    if !mod_name.is_empty() {
-                        let resolved = resolve_rust_mod_import(&mod_name, relative_path);
-                        for path in resolved {
-                            imports.push(ImportInfo { source: path });
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Resolve a Rust `mod foo;` declaration to possible file paths.
-///
-/// `mod foo;` in `src/lib.rs` → `src/foo.rs` or `src/foo/mod.rs`
-/// `mod baz;` in `src/bar/mod.rs` → `src/bar/baz.rs` or `src/bar/baz/mod.rs`
-fn resolve_rust_mod_import(mod_name: &str, current_file: &str) -> Vec<String> {
-    let parent = Path::new(current_file)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let mut candidates = Vec::new();
-    if parent.is_empty() {
-        candidates.push(format!("{}.rs", mod_name));
-        candidates.push(format!("{}/mod.rs", mod_name));
-    } else {
-        candidates.push(format!("{}/{}.rs", parent, mod_name));
-        candidates.push(format!("{}/{}/mod.rs", parent, mod_name));
-    }
-    candidates
-}
-
-/// Resolve a Rust `use crate::foo::bar` statement to a file path.
-///
-/// Only resolves intra-crate imports (starting with `crate::`).
-/// External crate imports (std::, serde::, etc.) are ignored.
-fn resolve_rust_use_import(use_text: &str, _current_file: &str) -> Option<String> {
-    // Strip `use ` prefix and trailing `;`
-    let trimmed = use_text
-        .trim()
-        .strip_prefix("use ")?
-        .trim_end_matches(';')
-        .trim();
-
-    // Only resolve crate-relative imports
-    let path = trimmed.strip_prefix("crate::")?;
-
-    // Handle `use crate::foo::bar::{A, B}` — take path up to the `{`
-    let path = if let Some(idx) = path.find('{') {
-        path[..idx].trim_end_matches(':')
-    } else {
-        path
-    };
-
-    if path.is_empty() {
-        return None;
-    }
-
-    // Map path components to file system: foo::bar → src/foo/bar.rs
-    let file_path = format!("src/{}.rs", path.replace("::", "/"));
-    Some(file_path)
-}
-
-/// Compute cyclomatic complexity by counting decision points in a Tree-sitter subtree.
-///
-/// Cyclomatic complexity = 1 + number of decision points.
-/// Decision points: if, elif/else if, for, while, try, except/catch,
-/// and, or, ternary/conditional expressions, case/match arms.
-fn compute_complexity(node: tree_sitter::Node<'_>, lang: Language) -> u32 {
-    let mut decisions = 0;
-    fn walk_decisions(node: tree_sitter::Node<'_>, decisions: &mut u32, lang: Language) {
-        let kind = node.kind();
-        match lang {
-            Language::Python => match kind {
-                "if_statement" | "elif_clause" | "for_statement" | "while_statement"
-                | "except_clause" | "with_statement" | "assert_statement" => {
-                    *decisions += 1;
-                }
-                "boolean_operator" => {
-                    // "and" / "or" each add a branch
-                    *decisions += 1;
-                }
-                "conditional_expression" => {
-                    // ternary: x if cond else y
-                    *decisions += 1;
-                }
-                "case_clause" => {
-                    // match/case arms (Python 3.10+)
-                    *decisions += 1;
-                }
-                _ => {}
-            },
-            Language::TypeScript | Language::JavaScript => match kind {
-                "if_statement" | "for_statement" | "for_in_statement" | "while_statement"
-                | "do_statement" | "catch_clause" | "switch_case" => {
-                    *decisions += 1;
-                }
-                "binary_expression" => {
-                    // Check for && or ||
-                    if let Some(op) = node.child_by_field_name("operator") {
-                        let op_text = op.kind();
-                        if op_text == "&&" || op_text == "||" {
-                            *decisions += 1;
-                        }
-                    }
-                }
-                "ternary_expression" => {
-                    *decisions += 1;
-                }
-                _ => {}
-            },
-            Language::Rust => match kind {
-                "if_expression"
-                | "if_let_expression"
-                | "for_expression"
-                | "while_expression"
-                | "while_let_expression"
-                | "loop_expression" => {
-                    *decisions += 1;
-                }
-                "match_arm" => {
-                    *decisions += 1;
-                }
-                "binary_expression" => {
-                    if let Some(op) = node.child_by_field_name("operator") {
-                        let op_text = op.kind();
-                        if op_text == "&&" || op_text == "||" {
-                            *decisions += 1;
-                        }
-                    }
-                }
-                "try_expression" | "error_propagation_expression" => {
-                    *decisions += 1;
-                }
-                _ => {}
-            },
-        }
-
-        let mut child_cursor = node.walk();
-        for child in node.children(&mut child_cursor) {
-            walk_decisions(child, decisions, lang);
-        }
-    }
-
-    walk_decisions(node, &mut decisions, lang);
-    1 + decisions // base complexity of 1
 }
 
 /// Get the appropriate tree-sitter language grammar for a file.
@@ -822,13 +292,11 @@ def helper():
         .unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // 2 modules + 3 functions + 1 class = 6 nodes (methods inside class not top-level)
         assert!(
             graph.node_count() >= 5,
             "Expected >= 5 nodes, got {}",
             graph.node_count()
         );
-        // Contains edges: module -> function/class
         assert!(
             graph.edge_count() >= 3,
             "Expected >= 3 contains edges, got {}",
@@ -854,7 +322,6 @@ class AppService {
         .unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // 1 module + 1 function + 1 class = 3 nodes minimum
         assert!(
             graph.node_count() >= 3,
             "Expected >= 3 nodes, got {}",
@@ -874,9 +341,7 @@ class AppService {
         fs::write(dir.path().join("utils.py"), "def helper():\n    pass\n").unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // Check that an import edge was created from main.py -> utils.py
         let _import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
-        // Import resolution depends on path matching — "utils.py" must match
         assert!(
             graph.node_count() >= 2,
             "Expected >= 2 nodes, got {}",
@@ -915,13 +380,11 @@ fn world() -> i32 {
         .unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // 1 module + 2 functions = 3 nodes
         assert!(
             graph.node_count() >= 3,
             "Expected >= 3 nodes, got {}",
             graph.node_count()
         );
-        // 2 contains edges (module -> function)
         assert!(
             graph.edge_count() >= 2,
             "Expected >= 2 edges, got {}",
@@ -952,7 +415,6 @@ trait MyTrait {
         .unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // 1 module + 3 classes (struct, enum, trait) = 4 nodes
         assert!(
             graph.node_count() >= 4,
             "Expected >= 4 nodes, got {}",
@@ -982,13 +444,11 @@ impl MyStruct {
         .unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // 1 module + 1 struct + 2 functions (MyStruct::new, MyStruct::method)
         assert!(
             graph.node_count() >= 4,
             "Expected >= 4 nodes, got {}",
             graph.node_count()
         );
-        // Check method is attributed to the impl type
         assert!(
             graph.get_node("service.rs::MyStruct::new").is_some(),
             "Expected node service.rs::MyStruct::new"
@@ -1007,7 +467,6 @@ impl MyStruct {
         fs::write(dir.path().join("src/foo.rs"), "pub fn helper() {}\n").unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
-        // Should have import edge from src/lib.rs -> src/foo.rs
         let import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
         assert!(
             !import_edges.is_empty(),
@@ -1036,11 +495,11 @@ impl MyStruct {
 
     #[test]
     fn test_rust_external_use_ignored() {
-        // use std::collections::HashMap should NOT create any edge
-        let result = resolve_rust_use_import("use std::collections::HashMap;", "src/lib.rs");
+        let result =
+            languages::rust_lang::resolve_use_import("use std::collections::HashMap;");
         assert!(result.is_none(), "External crate imports should be ignored");
 
-        let result = resolve_rust_use_import("use serde::Serialize;", "src/lib.rs");
+        let result = languages::rust_lang::resolve_use_import("use serde::Serialize;");
         assert!(result.is_none(), "External crate imports should be ignored");
     }
 
@@ -1076,12 +535,12 @@ fn complex_function(x: Option<i32>) -> i32 {
     #[test]
     fn test_rust_mod_resolution_paths() {
         // src/lib.rs with mod foo → src/foo.rs or src/foo/mod.rs
-        let paths = resolve_rust_mod_import("foo", "src/lib.rs");
+        let paths = languages::rust_lang::resolve_mod_import("foo", "src/lib.rs");
         assert!(paths.contains(&"src/foo.rs".to_string()));
         assert!(paths.contains(&"src/foo/mod.rs".to_string()));
 
         // src/bar/mod.rs with mod baz → src/bar/baz.rs or src/bar/baz/mod.rs
-        let paths = resolve_rust_mod_import("baz", "src/bar/mod.rs");
+        let paths = languages::rust_lang::resolve_mod_import("baz", "src/bar/mod.rs");
         assert!(paths.contains(&"src/bar/baz.rs".to_string()));
         assert!(paths.contains(&"src/bar/baz/mod.rs".to_string()));
     }
