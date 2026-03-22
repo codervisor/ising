@@ -6,20 +6,13 @@
 //! - Code churn (lines added + deleted)
 //! - Hotspot scores (change frequency × complexity)
 
+use crate::common::Language;
 use gix::bstr::ByteSlice;
 use ising_core::config::Config;
 use ising_core::graph::{ChangeMetrics, EdgeType, Node, UnifiedGraph};
 use ising_core::ignore::IgnoreRules;
 use std::collections::HashMap;
 use std::path::Path;
-
-/// Check if a file path has a supported source code extension.
-fn is_source_file(path: &str) -> bool {
-    matches!(
-        Path::new(path).extension().and_then(|e| e.to_str()),
-        Some("py" | "ts" | "tsx" | "js" | "jsx" | "rs")
-    )
-}
 
 /// Parse a time window string (e.g., "6 months ago") into a Unix timestamp cutoff.
 fn parse_time_window(window: &str) -> Option<i64> {
@@ -122,7 +115,7 @@ pub fn build_change_graph(
         // Get changed files by diffing against parent (only source code files, respecting .isingignore)
         let changed_files: std::collections::HashSet<String> = get_changed_files(&repo, &commit)?
             .into_iter()
-            .filter(|f| is_source_file(f) && !ignore.is_ignored(f))
+            .filter(|f| Language::is_supported_file(f) && !ignore.is_ignored(f))
             .collect();
 
         if !changed_files.is_empty() {
@@ -316,12 +309,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_source_file_includes_rust() {
-        assert!(is_source_file("src/main.rs"));
-        assert!(is_source_file("ising-core/src/lib.rs"));
-        assert!(is_source_file("app.py"));
-        assert!(is_source_file("index.ts"));
-        assert!(!is_source_file("readme.md"));
-        assert!(!is_source_file("Cargo.toml"));
+    fn test_is_supported_file_includes_rust() {
+        assert!(Language::is_supported_file("src/main.rs"));
+        assert!(Language::is_supported_file("ising-core/src/lib.rs"));
+        assert!(Language::is_supported_file("app.py"));
+        assert!(Language::is_supported_file("index.ts"));
+        assert!(!Language::is_supported_file("readme.md"));
+        assert!(!Language::is_supported_file("Cargo.toml"));
     }
 }
