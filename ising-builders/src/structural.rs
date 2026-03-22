@@ -173,61 +173,85 @@ fn analyze_file(
     let mut classes = Vec::new();
     let mut imports = Vec::new();
 
-    let mut parser = tree_sitter::Parser::new();
-    let tree_sitter_lang = get_tree_sitter_language(lang, file_path);
+    if lang == Language::Vue {
+        // Vue uses its own two-pass parsing (text-based script block extraction + TS re-parse)
+        languages::vue::extract_nodes(&source, &mut functions, &mut classes, &mut imports);
 
-    if let Some(ts_lang) = tree_sitter_lang {
-        parser.set_language(&ts_lang)?;
-        if let Some(tree) = parser.parse(&source, None) {
-            let root = tree.root_node();
-            match lang {
-                Language::Python => {
-                    languages::python::extract_nodes(
-                        root,
-                        &source,
-                        &relative_path,
-                        &mut functions,
-                        &mut classes,
-                        &mut imports,
-                    );
-                }
-                Language::TypeScript | Language::JavaScript => {
-                    languages::typescript::extract_nodes(
-                        root,
-                        &source,
-                        &mut functions,
-                        &mut classes,
-                        &mut imports,
-                    );
-                }
-                Language::Rust => {
-                    languages::rust_lang::extract_nodes(
-                        root,
-                        &source,
-                        &relative_path,
-                        &mut functions,
-                        &mut classes,
-                        &mut imports,
-                    );
-                }
-                Language::Go => {
-                    languages::go::extract_nodes(
-                        root,
-                        &source,
-                        &relative_path,
-                        repo_path,
-                        &mut functions,
-                        &mut classes,
-                        &mut imports,
-                    );
-                }
+        // Resolve @/ alias for Vue imports if a Vue/Vite config exists
+        let has_vue_config = repo_path.join("vite.config.ts").exists()
+            || repo_path.join("vite.config.js").exists()
+            || repo_path.join("vue.config.js").exists()
+            || repo_path.join("vue.config.ts").exists();
+
+        // Re-resolve imports using Vue-specific logic
+        let raw_imports = std::mem::take(&mut imports);
+        for imp in raw_imports {
+            if let Some(resolved) = languages::vue::resolve_vue_import(&imp.source, has_vue_config)
+            {
+                imports.push(languages::ImportInfo { source: resolved });
+            } else {
+                // Keep the original import (it may still match a module ID)
+                imports.push(imp);
             }
         }
     } else {
-        tracing::debug!(
-            "No tree-sitter grammar for {}, using basic analysis",
-            lang.name()
-        );
+        let mut parser = tree_sitter::Parser::new();
+        let tree_sitter_lang = get_tree_sitter_language(lang, file_path);
+
+        if let Some(ts_lang) = tree_sitter_lang {
+            parser.set_language(&ts_lang)?;
+            if let Some(tree) = parser.parse(&source, None) {
+                let root = tree.root_node();
+                match lang {
+                    Language::Python => {
+                        languages::python::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::TypeScript | Language::JavaScript => {
+                        languages::typescript::extract_nodes(
+                            root,
+                            &source,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::Rust => {
+                        languages::rust_lang::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::Go => {
+                        languages::go::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            repo_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::Vue => unreachable!(), // Handled above
+                }
+            }
+        } else {
+            tracing::debug!(
+                "No tree-sitter grammar for {}, using basic analysis",
+                lang.name()
+            );
+        }
     }
 
     Ok(FileAnalysis {
@@ -263,6 +287,7 @@ fn get_tree_sitter_language(lang: Language, file_path: &Path) -> Option<tree_sit
         }
         Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
         Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
+        Language::Vue => None, // Vue uses its own two-pass parsing
     }
 }
 
@@ -811,5 +836,243 @@ func init() {
         assert!(Language::is_supported_file("main.go"));
         assert!(Language::is_supported_file("internal/store/db.go"));
         assert!(Language::is_supported_file("main_test.go"));
+    }
+
+    // --- React arrow function component tests ---
+
+    #[test]
+    fn test_react_arrow_function_components() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("App.tsx"),
+            r#"
+const MyComponent = () => <div />
+
+const handler = async (e: Event) => {
+    console.log(e)
+}
+
+export default function Page() {
+    return <div />
+}
+
+export const getServerSideProps = async () => {
+    return { props: {} }
+}
+
+export class MyService {
+    run() {}
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+
+        assert!(
+            graph.get_node("App.tsx::MyComponent").is_some(),
+            "Expected arrow function component MyComponent"
+        );
+        assert!(
+            graph.get_node("App.tsx::handler").is_some(),
+            "Expected arrow function handler"
+        );
+        assert!(
+            graph.get_node("App.tsx::Page").is_some(),
+            "Expected exported function Page"
+        );
+        assert!(
+            graph.get_node("App.tsx::getServerSideProps").is_some(),
+            "Expected exported arrow function getServerSideProps"
+        );
+        assert!(
+            graph.get_node("App.tsx::MyService").is_some(),
+            "Expected exported class MyService"
+        );
+    }
+
+    // --- Vue SFC tests ---
+
+    #[test]
+    fn test_vue_is_supported_file() {
+        assert!(Language::is_supported_file("src/App.vue"));
+        assert!(Language::is_supported_file("components/Button.vue"));
+    }
+
+    #[test]
+    fn test_vue_sfc_extraction() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("App.vue"),
+            r#"<template>
+  <div>{{ count }}</div>
+</template>
+
+<script setup lang="ts">
+import { ref } from 'vue'
+import MyChild from './MyChild.vue'
+
+const count = ref(0)
+const handleClick = () => count.value++
+
+function resetCount() {
+  count.value = 0
+}
+</script>
+
+<style scoped>
+div { color: red; }
+</style>"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+
+        // Module node should exist
+        assert!(
+            graph.get_node("App.vue").is_some(),
+            "Expected module node App.vue"
+        );
+
+        // Arrow function should be extracted
+        assert!(
+            graph.get_node("App.vue::handleClick").is_some(),
+            "Expected arrow function handleClick"
+        );
+
+        // Regular function should be extracted
+        assert!(
+            graph.get_node("App.vue::resetCount").is_some(),
+            "Expected function resetCount"
+        );
+
+        // Language should be "vue"
+        let module_node = graph.get_node("App.vue").unwrap();
+        assert_eq!(module_node.language.as_deref(), Some("vue"));
+    }
+
+    #[test]
+    fn test_vue_sfc_line_numbers() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Counter.vue"),
+            r#"<template>
+  <button @click="increment">{{ count }}</button>
+</template>
+
+<script setup lang="ts">
+const increment = () => {
+  console.log('click')
+}
+</script>"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        let func = graph.get_node("Counter.vue::increment");
+        assert!(func.is_some(), "Expected increment function");
+        let func = func.unwrap();
+        // The arrow function is on line 6 of the .vue file (1-indexed)
+        // script block starts at line 5 (0-indexed line 4), content starts at line 5 (0-indexed)
+        // In the extracted content, the `const increment` is on line 1 (0-indexed line 0)
+        // With offset: 0 + 5 + 1 = 6
+        assert_eq!(
+            func.line_start,
+            Some(6),
+            "Expected line_start=6 for increment, got {:?}",
+            func.line_start
+        );
+    }
+
+    #[test]
+    fn test_vue_import_resolution() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("MyChild.vue"),
+            r#"<template><div>Child</div></template>
+<script setup lang="ts">
+function render() { return 'child' }
+</script>"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("App.vue"),
+            r#"<template><MyChild /></template>
+<script setup lang="ts">
+import MyChild from './MyChild.vue'
+
+const setup = () => {}
+</script>"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+
+        // Import edge from App.vue to MyChild.vue should exist
+        let import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
+        let has_vue_import = import_edges
+            .iter()
+            .any(|e| e.0 == "App.vue" && e.1 == "MyChild.vue");
+        assert!(
+            has_vue_import,
+            "Expected import edge from App.vue to MyChild.vue, edges: {:?}",
+            import_edges
+        );
+    }
+
+    #[test]
+    fn test_vue_at_alias_resolution() {
+        let dir = TempDir::new().unwrap();
+        // Create vite.config.ts to enable @/ alias
+        fs::write(dir.path().join("vite.config.ts"), "export default {}").unwrap();
+        fs::create_dir_all(dir.path().join("src/components")).unwrap();
+        fs::write(
+            dir.path().join("src/components/Button.vue"),
+            r#"<template><button>Click</button></template>
+<script setup lang="ts">
+function click() {}
+</script>"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("src/App.vue"),
+            r#"<template><Button /></template>
+<script setup lang="ts">
+import Button from '@/components/Button.vue'
+
+const setup = () => {}
+</script>"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+
+        // @/components/Button.vue should resolve to src/components/Button.vue
+        let import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
+        let has_alias_import = import_edges
+            .iter()
+            .any(|e| e.0 == "src/App.vue" && e.1 == "src/components/Button.vue");
+        assert!(
+            has_alias_import,
+            "Expected import edge from src/App.vue to src/components/Button.vue, edges: {:?}",
+            import_edges
+        );
+    }
+
+    #[test]
+    fn test_vue_no_script_block() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Template.vue"),
+            "<template><div>Static</div></template>\n<style>.x {}</style>",
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        // Module should exist but have no functions
+        assert!(
+            graph.get_node("Template.vue").is_some(),
+            "Expected module node even without script block"
+        );
     }
 }

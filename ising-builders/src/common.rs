@@ -13,6 +13,7 @@ pub enum Language {
     JavaScript,
     Rust,
     Go,
+    Vue,
 }
 
 impl Language {
@@ -24,6 +25,7 @@ impl Language {
             "js" | "jsx" => Some(Language::JavaScript),
             "rs" => Some(Language::Rust),
             "go" => Some(Language::Go),
+            "vue" => Some(Language::Vue),
             _ => None,
         }
     }
@@ -49,12 +51,13 @@ impl Language {
             Language::JavaScript => "javascript",
             Language::Rust => "rust",
             Language::Go => "go",
+            Language::Vue => "vue",
         }
     }
 
     /// All supported file extensions.
     pub fn supported_extensions() -> &'static [&'static str] {
-        &["py", "ts", "tsx", "js", "jsx", "rs", "go"]
+        &["py", "ts", "tsx", "js", "jsx", "rs", "go", "vue"]
     }
 }
 
@@ -68,6 +71,7 @@ mod tests {
         assert_eq!(Language::from_extension("ts"), Some(Language::TypeScript));
         assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
         assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+        assert_eq!(Language::from_extension("vue"), Some(Language::Vue));
         assert_eq!(Language::from_extension("md"), None);
     }
 
@@ -76,6 +80,7 @@ mod tests {
         assert!(Language::is_supported_file("src/main.rs"));
         assert!(Language::is_supported_file("app.py"));
         assert!(Language::is_supported_file("index.ts"));
+        assert!(Language::is_supported_file("src/App.vue"));
         assert!(!Language::is_supported_file("readme.md"));
         assert!(!Language::is_supported_file("Cargo.toml"));
     }
@@ -86,5 +91,6 @@ mod tests {
         assert!(exts.contains(&"py"));
         assert!(exts.contains(&"rs"));
         assert!(exts.contains(&"ts"));
+        assert!(exts.contains(&"vue"));
     }
 }
