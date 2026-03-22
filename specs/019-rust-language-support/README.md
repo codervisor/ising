@@ -1,5 +1,5 @@
 ---
-status: planned
+status: implemented
 created: 2026-03-20
 priority: high
 tags:
