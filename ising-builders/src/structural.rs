@@ -91,6 +91,26 @@ pub fn build_structural_graph(
                     let _ =
                         graph.add_edge(&result.module_id, &package_init, EdgeType::Imports, 1.0);
                 }
+            } else if result.language == "go" {
+                // Go imports resolve to directories — create edges to all .go files in the dir
+                let dir_prefix = if imp.source.ends_with('/') {
+                    imp.source.clone()
+                } else {
+                    format!("{}/", imp.source)
+                };
+                for target_id in &module_ids {
+                    if target_id.starts_with(&dir_prefix)
+                        && target_id.ends_with(".go")
+                        && *target_id != result.module_id
+                    {
+                        let _ = graph.add_edge(
+                            &result.module_id,
+                            target_id,
+                            EdgeType::Imports,
+                            1.0,
+                        );
+                    }
+                }
             }
         }
     }
@@ -190,6 +210,17 @@ fn analyze_file(
                         &mut imports,
                     );
                 }
+                Language::Go => {
+                    languages::go::extract_nodes(
+                        root,
+                        &source,
+                        &relative_path,
+                        repo_path,
+                        &mut functions,
+                        &mut classes,
+                        &mut imports,
+                    );
+                }
             }
         }
     } else {
@@ -231,6 +262,7 @@ fn get_tree_sitter_language(lang: Language, file_path: &Path) -> Option<tree_sit
             }
         }
         Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
+        Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
     }
 }
 
@@ -542,5 +574,242 @@ fn complex_function(x: Option<i32>) -> i32 {
         let paths = languages::rust_lang::resolve_mod_import("baz", "src/bar/mod.rs");
         assert!(paths.contains(&"src/bar/baz.rs".to_string()));
         assert!(paths.contains(&"src/bar/baz/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn test_walk_source_files_includes_go() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.go"), "package main\n").unwrap();
+        fs::write(dir.path().join("app.py"), "pass").unwrap();
+        fs::write(dir.path().join("readme.md"), "# hello").unwrap();
+
+        let files = walk_source_files(dir.path(), &IgnoreRules::parse(""));
+        assert_eq!(files.len(), 2);
+        let go_files: Vec<_> = files.iter().filter(|(_, l)| *l == Language::Go).collect();
+        assert_eq!(go_files.len(), 1);
+    }
+
+    #[test]
+    fn test_go_function_extraction() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            r#"package main
+
+func Hello() {
+    fmt.Println("hello")
+}
+
+func World() int {
+    return 42
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        assert!(
+            graph.node_count() >= 3,
+            "Expected >= 3 nodes (module + 2 functions), got {}",
+            graph.node_count()
+        );
+        assert!(
+            graph.get_node("main.go::Hello").is_some(),
+            "Expected node main.go::Hello"
+        );
+        assert!(
+            graph.get_node("main.go::World").is_some(),
+            "Expected node main.go::World"
+        );
+    }
+
+    #[test]
+    fn test_go_method_attribution() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("service.go"),
+            r#"package service
+
+type MyStruct struct {
+    Field int
+}
+
+func (s *MyStruct) Method() int {
+    return s.Field
+}
+
+func (s MyStruct) ValueMethod() string {
+    return "hello"
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        assert!(
+            graph.get_node("service.go::MyStruct::Method").is_some(),
+            "Expected node service.go::MyStruct::Method"
+        );
+        assert!(
+            graph.get_node("service.go::MyStruct::ValueMethod").is_some(),
+            "Expected node service.go::MyStruct::ValueMethod"
+        );
+    }
+
+    #[test]
+    fn test_go_struct_and_interface_extraction() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("types.go"),
+            r#"package types
+
+type Foo struct {
+    Name string
+    Age  int
+}
+
+type Bar interface {
+    DoThing() error
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        assert!(
+            graph.get_node("types.go::Foo").is_some(),
+            "Expected class node types.go::Foo"
+        );
+        assert!(
+            graph.get_node("types.go::Bar").is_some(),
+            "Expected class node types.go::Bar"
+        );
+    }
+
+    #[test]
+    fn test_go_complexity() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("complex.go"),
+            r#"package main
+
+func complexFunc(x int) int {
+    if x > 0 {
+        for i := 0; i < x; i++ {
+            switch i {
+            case 1:
+                return 1
+            case 2:
+                return 2
+            case 3:
+                return 3
+            }
+        }
+    }
+    return 0
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        let func_node = graph.get_node("complex.go::complexFunc");
+        assert!(func_node.is_some(), "Expected complexFunc node");
+        let complexity = func_node.unwrap().complexity.unwrap_or(0);
+        // 1 base + 1 if + 1 for + 3 cases = 6
+        assert_eq!(complexity, 6, "Expected complexity 6, got {}", complexity);
+    }
+
+    #[test]
+    fn test_go_stdlib_import_ignored() {
+        let result = languages::go::resolve_go_import("fmt", "main.go", Some("github.com/user/project"));
+        assert!(result.is_none(), "Standard library imports should be ignored");
+
+        let result = languages::go::resolve_go_import("net/http", "main.go", Some("github.com/user/project"));
+        assert!(result.is_none(), "Standard library imports should be ignored");
+    }
+
+    #[test]
+    fn test_go_intra_module_import_resolution() {
+        let result = languages::go::resolve_go_import(
+            "github.com/user/project/internal/store",
+            "main.go",
+            Some("github.com/user/project"),
+        );
+        assert_eq!(result, Some("internal/store".to_string()));
+    }
+
+    #[test]
+    fn test_go_import_edges() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module github.com/test/project\n\ngo 1.21\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            r#"package main
+
+import "github.com/test/project/pkg"
+
+func main() {
+    pkg.Hello()
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pkg/hello.go"),
+            r#"package pkg
+
+func Hello() {}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        let import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
+        assert!(
+            !import_edges.is_empty(),
+            "Expected at least one import edge for intra-module import"
+        );
+    }
+
+    #[test]
+    fn test_go_init_dedup() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("main.go"),
+            r#"package main
+
+func init() {
+    fmt.Println("first")
+}
+
+func init() {
+    fmt.Println("second")
+}
+"#,
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
+        assert!(
+            graph.get_node("main.go::init").is_some(),
+            "Expected node main.go::init"
+        );
+        assert!(
+            graph.get_node("main.go::init_2").is_some(),
+            "Expected node main.go::init_2"
+        );
+    }
+
+    #[test]
+    fn test_go_is_supported_file() {
+        assert!(Language::is_supported_file("main.go"));
+        assert!(Language::is_supported_file("internal/store/db.go"));
+        assert!(Language::is_supported_file("main_test.go"));
     }
 }

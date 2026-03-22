@@ -12,6 +12,7 @@ pub enum Language {
     TypeScript,
     JavaScript,
     Rust,
+    Go,
 }
 
 impl Language {
@@ -22,6 +23,7 @@ impl Language {
             "ts" | "tsx" => Some(Language::TypeScript),
             "js" | "jsx" => Some(Language::JavaScript),
             "rs" => Some(Language::Rust),
+            "go" => Some(Language::Go),
             _ => None,
         }
     }
@@ -46,12 +48,13 @@ impl Language {
             Language::TypeScript => "typescript",
             Language::JavaScript => "javascript",
             Language::Rust => "rust",
+            Language::Go => "go",
         }
     }
 
     /// All supported file extensions.
     pub fn supported_extensions() -> &'static [&'static str] {
-        &["py", "ts", "tsx", "js", "jsx", "rs"]
+        &["py", "ts", "tsx", "js", "jsx", "rs", "go"]
     }
 }
 
