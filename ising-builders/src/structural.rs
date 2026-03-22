@@ -495,8 +495,7 @@ impl MyStruct {
 
     #[test]
     fn test_rust_external_use_ignored() {
-        let result =
-            languages::rust_lang::resolve_use_import("use std::collections::HashMap;");
+        let result = languages::rust_lang::resolve_use_import("use std::collections::HashMap;");
         assert!(result.is_none(), "External crate imports should be ignored");
 
         let result = languages::rust_lang::resolve_use_import("use serde::Serialize;");

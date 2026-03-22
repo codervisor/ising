@@ -195,8 +195,12 @@ fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
     let mut decisions = 0;
     fn walk(node: tree_sitter::Node<'_>, decisions: &mut u32) {
         match node.kind() {
-            "if_expression" | "if_let_expression" | "for_expression" | "while_expression"
-            | "while_let_expression" | "loop_expression" => {
+            "if_expression"
+            | "if_let_expression"
+            | "for_expression"
+            | "while_expression"
+            | "while_let_expression"
+            | "loop_expression" => {
                 *decisions += 1;
             }
             "match_arm" => {
