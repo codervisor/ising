@@ -2,6 +2,15 @@
 //!
 //! Converts SCIP (Source Code Intelligence Protocol) protobuf indexes
 //! into the Ising unified graph model.
+//!
+//! # Deprecated
+//!
+//! This crate is deprecated in favor of Tree-sitter based structural analysis
+//! (see spec 019). Tree-sitter provides sufficient signal accuracy without
+//! requiring external indexers. This crate will be removed in a future release.
+#![deprecated(
+    note = "ising-scip is deprecated. Use Tree-sitter structural analysis instead (spec 019)."
+)]
 
 use ising_core::graph::{EdgeType, Node, NodeType, UnifiedGraph};
 use protobuf::Message;

@@ -17,7 +17,7 @@ use std::path::Path;
 fn is_source_file(path: &str) -> bool {
     matches!(
         Path::new(path).extension().and_then(|e| e.to_str()),
-        Some("py" | "ts" | "tsx" | "js" | "jsx")
+        Some("py" | "ts" | "tsx" | "js" | "jsx" | "rs")
     )
 }
 
@@ -313,5 +313,15 @@ mod tests {
             ordered_pair("a.py", "b.py"),
             ("a.py".to_string(), "b.py".to_string())
         );
+    }
+
+    #[test]
+    fn test_is_source_file_includes_rust() {
+        assert!(is_source_file("src/main.rs"));
+        assert!(is_source_file("ising-core/src/lib.rs"));
+        assert!(is_source_file("app.py"));
+        assert!(is_source_file("index.ts"));
+        assert!(!is_source_file("readme.md"));
+        assert!(!is_source_file("Cargo.toml"));
     }
 }
