@@ -33,6 +33,7 @@ Thumbs.db
 
 # Ising generated database
 ising.db
+ising-self.db
 
 # Temporary
 tmp/
