@@ -1,5 +1,5 @@
 ---
-status: planned
+status: complete
 created: 2026-03-20
 priority: high
 tags:
@@ -14,7 +14,7 @@ updated_at: 2026-03-20T10:17:19.357825Z
 ---
 # Frontend Framework Support
 
-> **Status**: draft · **Priority**: high · **Created**: 2026-03-20
+> **Status**: complete · **Priority**: high · **Created**: 2026-03-20
 
 ## Overview
 
