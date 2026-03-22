@@ -70,6 +70,16 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     let thresholds = &config.thresholds;
 
     // --- Edge-level signals ---
+
+    // Precompute importer index: for each node, the set of nodes that import it.
+    // Used for common-parent suppression in ghost coupling detection.
+    let import_edges_all = graph.edges_of_type(&EdgeType::Imports);
+    let mut importers: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
+        std::collections::HashMap::new();
+    for (src, tgt, _) in &import_edges_all {
+        importers.entry(tgt).or_default().insert(src);
+    }
+
     // Iterate over co-change edges (Layer 2)
     let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
     for (a, b, coupling) in &co_change_edges {
@@ -86,16 +96,44 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             && is_source_file(a)
             && is_source_file(b)
         {
-            signals.push(Signal::new(
-                SignalType::GhostCoupling,
-                a,
-                Some(b),
-                *coupling,
-                format!(
-                    "No structural dependency, but {:.0}% co-change rate. Likely missing an abstraction layer.",
-                    coupling * 100.0
-                ),
-            ));
+            // Common-parent suppression: if both A and B share a common importer,
+            // their co-change is explained by the shared parent orchestrating both.
+            let empty = std::collections::HashSet::new();
+            let importers_a = importers.get(a).unwrap_or(&empty);
+            let importers_b = importers.get(b).unwrap_or(&empty);
+            let shared_parents: Vec<&&str> = importers_a.intersection(importers_b).collect();
+
+            if !shared_parents.is_empty() {
+                // Shared parent exists — suppress or reduce severity
+                if *coupling >= 0.9 {
+                    // Very high coupling: still emit at reduced severity with explanation
+                    let parent_names: Vec<&str> =
+                        shared_parents.iter().map(|s| **s).collect();
+                    signals.push(Signal::new(
+                        SignalType::GhostCoupling,
+                        a,
+                        Some(b),
+                        *coupling * 0.3,
+                        format!(
+                            "No structural dependency, but {:.0}% co-change rate. Co-change likely explained by shared parent {}, but coupling is very high — verify no hidden dependency.",
+                            coupling * 100.0,
+                            parent_names.join(", ")
+                        ),
+                    ));
+                }
+                // If coupling < 0.9: skip signal entirely
+            } else {
+                signals.push(Signal::new(
+                    SignalType::GhostCoupling,
+                    a,
+                    Some(b),
+                    *coupling,
+                    format!(
+                        "No structural dependency, but {:.0}% co-change rate. Likely missing an abstraction layer.",
+                        coupling * 100.0
+                    ),
+                ));
+            }
         }
 
         // Fragile Boundary: structural dep + high co-change + fault propagation
@@ -391,7 +429,7 @@ fn is_docs_example(path: &str) -> bool {
 
 fn is_reexport_module(path: &str) -> bool {
     let filename = path.rsplit('/').next().unwrap_or(path);
-    filename == "__init__.py" || filename == "index.ts" || filename == "index.js"
+    filename == "__init__.py" || filename == "index.ts" || filename == "index.js" || filename == "mod.rs"
 }
 
 #[cfg(test)]
@@ -535,5 +573,115 @@ mod tests {
         for w in signals.windows(2) {
             assert!(w[0].severity >= w[1].severity);
         }
+    }
+
+    #[test]
+    fn test_ghost_coupling_suppressed_by_common_parent() {
+        // A and B are siblings imported by parent C — no ghost coupling
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_node(Node::module("parent.py", "parent.py"));
+        // Parent imports both A and B
+        g.add_edge("parent.py", "a.py", EdgeType::Imports, 1.0)
+            .unwrap();
+        g.add_edge("parent.py", "b.py", EdgeType::Imports, 1.0)
+            .unwrap();
+        // A and B co-change at 80% but have no direct structural edge
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling),
+            "Ghost coupling should be suppressed when siblings share a common parent"
+        );
+    }
+
+    #[test]
+    fn test_ghost_coupling_common_parent_very_high_coupling_reduced() {
+        // A and B share a parent but have ≥0.9 coupling — emit at reduced severity
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_node(Node::module("parent.py", "parent.py"));
+        g.add_edge("parent.py", "a.py", EdgeType::Imports, 1.0)
+            .unwrap();
+        g.add_edge("parent.py", "b.py", EdgeType::Imports, 1.0)
+            .unwrap();
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.95)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        let ghost = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::GhostCoupling);
+        assert!(
+            ghost.is_some(),
+            "Ghost coupling should still fire for very high coupling (≥0.9) with common parent"
+        );
+        let ghost = ghost.unwrap();
+        // Severity should be reduced: 0.95 * 0.3 = 0.285
+        assert!(
+            ghost.severity < 0.5,
+            "Severity should be reduced (got {})",
+            ghost.severity
+        );
+        assert!(
+            ghost.description.contains("shared parent"),
+            "Description should mention shared parent"
+        );
+    }
+
+    #[test]
+    fn test_ghost_coupling_no_common_parent_still_fires() {
+        // A and B have no common parent — ghost coupling should fire as before
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        // No import edges, just co-change
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling),
+            "Ghost coupling should still fire when no common parent exists"
+        );
+    }
+
+    #[test]
+    fn test_mod_rs_recognized_as_reexport_module() {
+        assert!(is_reexport_module("src/languages/mod.rs"));
+        assert!(is_reexport_module("mod.rs"));
+    }
+
+    #[test]
+    fn test_lib_rs_not_recognized_as_reexport_module() {
+        // lib.rs may contain real logic — don't blanket-recognize it
+        assert!(!is_reexport_module("src/lib.rs"));
+        assert!(!is_reexport_module("lib.rs"));
+    }
+
+    #[test]
+    fn test_no_over_engineering_for_mod_rs() {
+        // mod.rs barrel files should not trigger over-engineering
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("src/lib.rs", "src/lib.rs"));
+        let mut mod_node = Node::module("src/languages/mod.rs", "src/languages/mod.rs");
+        mod_node.complexity = Some(2);
+        g.add_node(mod_node);
+        g.add_edge("src/lib.rs", "src/languages/mod.rs", EdgeType::Imports, 1.0)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals.iter().any(|s| s.signal_type == SignalType::OverEngineering),
+            "mod.rs barrel files should not trigger over-engineering signals"
+        );
     }
 }
