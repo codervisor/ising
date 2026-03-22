@@ -375,7 +375,8 @@ mod tests {
         g.add_node(Node::module("b", "b.py"));
         g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
         assert!(g.has_structural_edge("a", "b"));
-        assert!(!g.has_structural_edge("b", "a").then_some(()).is_none() || true);
+        // has_structural_edge is bidirectional, so b→a is also true
+        assert!(g.has_structural_edge("b", "a"));
     }
 
     #[test]
