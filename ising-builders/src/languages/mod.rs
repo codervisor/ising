@@ -3,6 +3,7 @@
 //! Each language implements extraction of functions, classes, and imports
 //! from its Tree-sitter parse tree.
 
+pub mod go;
 pub mod python;
 pub mod rust_lang;
 pub mod typescript;
