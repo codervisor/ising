@@ -103,12 +103,23 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             let importers_b = importers.get(b).unwrap_or(&empty);
             let shared_parents: Vec<&&str> = importers_a.intersection(importers_b).collect();
 
-            if !shared_parents.is_empty() {
+            // Also check for cross-crate siblings: files in different workspace
+            // crates co-change due to shared workspace orchestration, but cross-crate
+            // imports aren't tracked as structural edges.
+            let has_shared_parent = !shared_parents.is_empty()
+                || is_cross_crate_pair(a, b);
+
+            if has_shared_parent {
                 // Shared parent exists — suppress or reduce severity
                 if *coupling >= 0.9 {
                     // Very high coupling: still emit at reduced severity with explanation
                     let parent_names: Vec<&str> =
                         shared_parents.iter().map(|s| **s).collect();
+                    let parent_desc = if parent_names.is_empty() {
+                        "workspace orchestration".to_string()
+                    } else {
+                        parent_names.join(", ")
+                    };
                     signals.push(Signal::new(
                         SignalType::GhostCoupling,
                         a,
@@ -117,7 +128,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                         format!(
                             "No structural dependency, but {:.0}% co-change rate. Co-change likely explained by shared parent {}, but coupling is very high — verify no hidden dependency.",
                             coupling * 100.0,
-                            parent_names.join(", ")
+                            parent_desc
                         ),
                     ));
                 }
@@ -427,6 +438,31 @@ fn is_docs_example(path: &str) -> bool {
         || path.contains("/examples/")
 }
 
+/// Check if two paths are in different workspace crates.
+/// Cross-crate co-change is typically explained by shared workspace orchestration,
+/// since cross-crate imports aren't tracked as structural edges.
+fn is_cross_crate_pair(a: &str, b: &str) -> bool {
+    let crate_a = extract_crate_prefix(a);
+    let crate_b = extract_crate_prefix(b);
+    match (crate_a, crate_b) {
+        (Some(ca), Some(cb)) => ca != cb,
+        _ => false,
+    }
+}
+
+/// Extract the crate prefix from a workspace-relative path.
+/// E.g., "ising-builders/src/change.rs" → Some("ising-builders")
+///       "src/lib.rs" → None (not in a subcrate)
+fn extract_crate_prefix(path: &str) -> Option<&str> {
+    // Look for pattern: <crate-name>/src/...
+    let (first, rest) = path.split_once('/')?;
+    if rest.starts_with("src/") || rest == "src" {
+        Some(first)
+    } else {
+        None
+    }
+}
+
 fn is_reexport_module(path: &str) -> bool {
     let filename = path.rsplit('/').next().unwrap_or(path);
     filename == "__init__.py" || filename == "index.ts" || filename == "index.js" || filename == "mod.rs"
@@ -682,6 +718,68 @@ mod tests {
         assert!(
             !signals.iter().any(|s| s.signal_type == SignalType::OverEngineering),
             "mod.rs barrel files should not trigger over-engineering signals"
+        );
+    }
+
+    #[test]
+    fn test_cross_crate_pair_detection() {
+        assert!(is_cross_crate_pair(
+            "crate-a/src/foo.rs",
+            "crate-b/src/bar.rs"
+        ));
+        assert!(!is_cross_crate_pair(
+            "crate-a/src/foo.rs",
+            "crate-a/src/bar.rs"
+        ));
+        // Not in subcrates (no crate prefix)
+        assert!(!is_cross_crate_pair("src/foo.rs", "src/bar.rs"));
+    }
+
+    #[test]
+    fn test_ghost_coupling_suppressed_cross_crate() {
+        // Files in different workspace crates should not trigger ghost coupling
+        // because cross-crate imports aren't tracked as structural edges
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("crate-a/src/foo.rs", "crate-a/src/foo.rs"));
+        g.add_node(Node::module("crate-b/src/bar.rs", "crate-b/src/bar.rs"));
+        // High co-change but no structural edge (cross-crate)
+        g.add_edge(
+            "crate-a/src/foo.rs",
+            "crate-b/src/bar.rs",
+            EdgeType::CoChanges,
+            0.8,
+        )
+        .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling),
+            "Ghost coupling should be suppressed for cross-crate pairs"
+        );
+    }
+
+    #[test]
+    fn test_ghost_coupling_same_crate_no_parent_still_fires() {
+        // Files in the same crate without a common parent should still fire
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("mycrate/src/foo.rs", "mycrate/src/foo.rs"));
+        g.add_node(Node::module("mycrate/src/bar.rs", "mycrate/src/bar.rs"));
+        g.add_edge(
+            "mycrate/src/foo.rs",
+            "mycrate/src/bar.rs",
+            EdgeType::CoChanges,
+            0.8,
+        )
+        .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling),
+            "Ghost coupling should still fire for same-crate files without a common parent"
         );
     }
 }
