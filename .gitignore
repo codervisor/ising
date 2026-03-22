@@ -32,8 +32,7 @@ Thumbs.db
 *.scip.json
 
 # Ising generated database
-ising.db
-ising-self.db
+*.db
 
 # Temporary
 tmp/
