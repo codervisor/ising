@@ -1,7 +1,7 @@
 //! Database schema initialization and management.
 
-use crate::DbError;
 use crate::Database;
+use crate::DbError;
 
 impl Database {
     pub(crate) fn init_schema(&self) -> Result<(), DbError> {

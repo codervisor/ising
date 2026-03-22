@@ -3,9 +3,9 @@
 //! Persists nodes, edges, change/defect metrics, and cross-layer signals
 //! to a single SQLite file for fast CLI queries and MCP tool serving.
 
-mod schema;
-mod queries;
 pub mod export;
+mod queries;
+mod schema;
 
 use ising_core::graph::ChangeMetrics;
 use rusqlite::Connection;
