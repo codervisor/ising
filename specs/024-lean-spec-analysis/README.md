@@ -1,6 +1,26 @@
-# Analysis of codervisor/lean-spec
+---
+status: complete
+created: 2026-03-22
+priority: low
+tags:
+- analysis
+- lean-spec
+- external-repo
+depends_on:
+- '021'
+created_at: 2026-03-22T00:00:00Z
+updated_at: 2026-03-22T00:00:00Z
+---
+
+# Ising Analysis of codervisor/lean-spec
+
+> **Status**: complete · **Priority**: low · **Created**: 2026-03-22
 
 ## Overview
+
+Run Ising against the [codervisor/lean-spec](https://github.com/codervisor/lean-spec)
+repository to validate signal detection on a real-world Rust + TypeScript
+monorepo and document findings.
 
 **LeanSpec** is a Spec-Driven Development (SDD) framework for AI-powered
 development workflows. Specs are small (< 2,000 tokens), focused documents that
@@ -170,7 +190,7 @@ High-dependency, low-change files — reliable foundations:
 
 These are well-stabilized modules that other code depends on but rarely need changes.
 
-### Recommendations
+## Recommendations
 
 1. **Extract shared UI contracts**: The dominant signal is ghost coupling between
    parallel UI components. Introduce shared TypeScript interfaces or context
