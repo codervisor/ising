@@ -552,35 +552,32 @@ fn extract_rust_nodes(
                 if let Some(body) = child.child_by_field_name("body") {
                     let mut body_cursor = body.walk();
                     for item in body.children(&mut body_cursor) {
-                        if item.kind() == "function_item" {
-                            if let Some(name_node) = item.child_by_field_name("name") {
-                                let method_name = name_node
-                                    .utf8_text(source.as_bytes())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = if impl_type.is_empty() {
-                                    method_name
-                                } else {
-                                    format!("{}::{}", impl_type, method_name)
-                                };
-                                let complexity = compute_complexity(item, Language::Rust);
-                                functions.push(FunctionInfo {
-                                    name,
-                                    line_start: item.start_position().row as u32 + 1,
-                                    line_end: item.end_position().row as u32 + 1,
-                                    complexity,
-                                });
-                            }
+                        if item.kind() == "function_item"
+                            && let Some(name_node) = item.child_by_field_name("name")
+                        {
+                            let method_name = name_node
+                                .utf8_text(source.as_bytes())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = if impl_type.is_empty() {
+                                method_name
+                            } else {
+                                format!("{}::{}", impl_type, method_name)
+                            };
+                            let complexity = compute_complexity(item, Language::Rust);
+                            functions.push(FunctionInfo {
+                                name,
+                                line_start: item.start_position().row as u32 + 1,
+                                line_end: item.end_position().row as u32 + 1,
+                                complexity,
+                            });
                         }
                     }
                 }
             }
             "use_declaration" => {
                 // Extract the full use path text
-                let use_text = child
-                    .utf8_text(source.as_bytes())
-                    .unwrap_or("")
-                    .to_string();
+                let use_text = child.utf8_text(source.as_bytes()).unwrap_or("").to_string();
                 if let Some(path) = resolve_rust_use_import(&use_text, relative_path) {
                     imports.push(ImportInfo { source: path });
                 }
@@ -588,17 +585,15 @@ fn extract_rust_nodes(
             "mod_item" => {
                 // Only handle `mod foo;` (no body) — file-referencing module declarations
                 let has_body = child.child_by_field_name("body").is_some();
-                if !has_body {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let mod_name = name_node
-                            .utf8_text(source.as_bytes())
-                            .unwrap_or("")
-                            .to_string();
-                        if !mod_name.is_empty() {
-                            let resolved = resolve_rust_mod_import(&mod_name, relative_path);
-                            for path in resolved {
-                                imports.push(ImportInfo { source: path });
-                            }
+                if !has_body && let Some(name_node) = child.child_by_field_name("name") {
+                    let mod_name = name_node
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .to_string();
+                    if !mod_name.is_empty() {
+                        let resolved = resolve_rust_mod_import(&mod_name, relative_path);
+                        for path in resolved {
+                            imports.push(ImportInfo { source: path });
                         }
                     }
                 }
@@ -635,7 +630,11 @@ fn resolve_rust_mod_import(mod_name: &str, current_file: &str) -> Vec<String> {
 /// External crate imports (std::, serde::, etc.) are ignored.
 fn resolve_rust_use_import(use_text: &str, _current_file: &str) -> Option<String> {
     // Strip `use ` prefix and trailing `;`
-    let trimmed = use_text.trim().strip_prefix("use ")?.trim_end_matches(';').trim();
+    let trimmed = use_text
+        .trim()
+        .strip_prefix("use ")?
+        .trim_end_matches(';')
+        .trim();
 
     // Only resolve crate-relative imports
     let path = trimmed.strip_prefix("crate::")?;
@@ -705,8 +704,12 @@ fn compute_complexity(node: tree_sitter::Node<'_>, lang: Language) -> u32 {
                 _ => {}
             },
             Language::Rust => match kind {
-                "if_expression" | "if_let_expression" | "for_expression"
-                | "while_expression" | "while_let_expression" | "loop_expression" => {
+                "if_expression"
+                | "if_let_expression"
+                | "for_expression"
+                | "while_expression"
+                | "while_let_expression"
+                | "loop_expression" => {
                     *decisions += 1;
                 }
                 "match_arm" => {
@@ -1000,16 +1003,8 @@ impl MyStruct {
     fn test_rust_mod_import_resolution() {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
-        fs::write(
-            dir.path().join("src/lib.rs"),
-            "mod foo;\n\nfn main() {}\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("src/foo.rs"),
-            "pub fn helper() {}\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "mod foo;\n\nfn main() {}\n").unwrap();
+        fs::write(dir.path().join("src/foo.rs"), "pub fn helper() {}\n").unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         // Should have import edge from src/lib.rs -> src/foo.rs
@@ -1029,11 +1024,7 @@ impl MyStruct {
             "use crate::bar::baz;\n\nfn main() {}\n",
         )
         .unwrap();
-        fs::write(
-            dir.path().join("src/bar/baz.rs"),
-            "pub fn helper() {}\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("src/bar/baz.rs"), "pub fn helper() {}\n").unwrap();
 
         let graph = build_structural_graph(dir.path(), &IgnoreRules::parse("")).unwrap();
         let import_edges = graph.edges_of_type(&ising_core::graph::EdgeType::Imports);
@@ -1094,5 +1085,4 @@ fn complex_function(x: Option<i32>) -> i32 {
         assert!(paths.contains(&"src/bar/baz.rs".to_string()));
         assert!(paths.contains(&"src/bar/baz/mod.rs".to_string()));
     }
-
 }
