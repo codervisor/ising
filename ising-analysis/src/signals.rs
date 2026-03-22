@@ -106,15 +106,13 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             // Also check for cross-crate siblings: files in different workspace
             // crates co-change due to shared workspace orchestration, but cross-crate
             // imports aren't tracked as structural edges.
-            let has_shared_parent = !shared_parents.is_empty()
-                || is_cross_crate_pair(a, b);
+            let has_shared_parent = !shared_parents.is_empty() || is_cross_crate_pair(a, b);
 
             if has_shared_parent {
                 // Shared parent exists — suppress or reduce severity
                 if *coupling >= 0.9 {
                     // Very high coupling: still emit at reduced severity with explanation
-                    let parent_names: Vec<&str> =
-                        shared_parents.iter().map(|s| **s).collect();
+                    let parent_names: Vec<&str> = shared_parents.iter().map(|s| **s).collect();
                     let parent_desc = if parent_names.is_empty() {
                         "workspace orchestration".to_string()
                     } else {
@@ -465,7 +463,10 @@ fn extract_crate_prefix(path: &str) -> Option<&str> {
 
 fn is_reexport_module(path: &str) -> bool {
     let filename = path.rsplit('/').next().unwrap_or(path);
-    filename == "__init__.py" || filename == "index.ts" || filename == "index.js" || filename == "mod.rs"
+    filename == "__init__.py"
+        || filename == "index.ts"
+        || filename == "index.js"
+        || filename == "mod.rs"
 }
 
 #[cfg(test)]
@@ -716,7 +717,9 @@ mod tests {
 
         let signals = detect_signals(&g, &default_config());
         assert!(
-            !signals.iter().any(|s| s.signal_type == SignalType::OverEngineering),
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OverEngineering),
             "mod.rs barrel files should not trigger over-engineering signals"
         );
     }
