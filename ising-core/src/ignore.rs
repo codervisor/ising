@@ -24,15 +24,33 @@ struct IgnorePattern {
     negated: bool,
 }
 
+/// Built-in patterns for generated code that should always be excluded.
+/// These produce false positives (high complexity/LOC but not actionable)
+/// and are rarely useful for architectural analysis.
+const BUILTIN_IGNORE_PATTERNS: &str = "\
+# Protobuf generated code
+*.pb.go
+*_pb.go
+*_grpc.pb.go
+*.pb.ts
+*_pb.ts
+*_pb2.py
+*_pb2_grpc.py
+# General code generation
+*.generated.ts
+*.generated.go
+*.generated.rs
+*.g.dart
+";
+
 impl IgnoreRules {
     /// Load ignore rules from a `.isingignore` file in the given directory.
-    /// Returns empty rules if the file doesn't exist.
+    /// Built-in patterns for generated code are always included.
     pub fn load(repo_path: &Path) -> Self {
         let ignore_path = repo_path.join(".isingignore");
-        match std::fs::read_to_string(&ignore_path) {
-            Ok(content) => Self::parse(&content),
-            Err(_) => Self { patterns: vec![] },
-        }
+        let user_content = std::fs::read_to_string(&ignore_path).unwrap_or_default();
+        let combined = format!("{}\n{}", BUILTIN_IGNORE_PATTERNS, user_content);
+        Self::parse(&combined)
     }
 
     /// Parse ignore rules from a string.
@@ -67,9 +85,15 @@ impl IgnoreRules {
         ignored
     }
 
-    /// Returns true if no rules are loaded.
+    /// Returns true if no rules are loaded (excluding built-in defaults).
     pub fn is_empty(&self) -> bool {
         self.patterns.is_empty()
+    }
+
+    /// Returns true if user-defined rules were loaded from `.isingignore`.
+    pub fn has_user_rules(&self) -> bool {
+        let builtin_count = Self::parse(BUILTIN_IGNORE_PATTERNS).patterns.len();
+        self.patterns.len() > builtin_count
     }
 }
 
@@ -177,5 +201,37 @@ mod tests {
         let rules = IgnoreRules::parse("");
         assert!(rules.is_empty());
         assert!(!rules.is_ignored("anything.py"));
+    }
+
+    #[test]
+    fn test_builtin_patterns_ignore_generated_code() {
+        let rules = IgnoreRules::parse(BUILTIN_IGNORE_PATTERNS);
+        // Protobuf Go
+        assert!(rules.is_ignored("grpc/model_service_v2_request.pb.go"));
+        assert!(rules.is_ignored("grpc/service_grpc.pb.go"));
+        // Protobuf TypeScript
+        assert!(rules.is_ignored("api/types_pb.ts"));
+        // Protobuf Python
+        assert!(rules.is_ignored("proto/model_pb2.py"));
+        assert!(rules.is_ignored("proto/model_pb2_grpc.py"));
+        // General generated
+        assert!(rules.is_ignored("src/schema.generated.ts"));
+        assert!(rules.is_ignored("lib/model.g.dart"));
+        // Non-generated files should pass through
+        assert!(!rules.is_ignored("vcs/git.go"));
+        assert!(!rules.is_ignored("src/main.rs"));
+        assert!(!rules.is_ignored("api/handler.ts"));
+    }
+
+    #[test]
+    fn test_has_user_rules() {
+        // Built-in only: no user rules
+        let rules = IgnoreRules::parse(BUILTIN_IGNORE_PATTERNS);
+        assert!(!rules.has_user_rules());
+
+        // With extra user rule
+        let combined = format!("{}\ndocs_src/", BUILTIN_IGNORE_PATTERNS);
+        let rules = IgnoreRules::parse(&combined);
+        assert!(rules.has_user_rules());
     }
 }

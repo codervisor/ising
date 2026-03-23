@@ -18,7 +18,7 @@ use std::path::Path;
 /// Build the complete multi-layer graph for a repository.
 pub fn build_all(repo_path: &Path, config: &Config) -> Result<UnifiedGraph, anyhow::Error> {
     let ignore = IgnoreRules::load(repo_path);
-    if !ignore.is_empty() {
+    if ignore.has_user_rules() {
         tracing::info!("Loaded .isingignore rules");
     }
 
