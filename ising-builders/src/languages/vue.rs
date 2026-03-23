@@ -13,14 +13,12 @@ use std::sync::LazyLock;
 
 /// Regex to match `<script>`, `<script setup>`, `<script lang="ts">`, etc.
 /// Captures the attributes (group 1) and the content (group 2).
-static SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?si)<script([^>]*)>(.*?)</script>").unwrap()
-});
+static SCRIPT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?si)<script([^>]*)>(.*?)</script>").unwrap());
 
 /// Regex to detect `lang="ts"` or `lang='ts'` in script tag attributes.
-static LANG_TS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)lang\s*=\s*["']ts["']"#).unwrap()
-});
+static LANG_TS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)lang\s*=\s*["']ts["']"#).unwrap());
 
 /// Information about an extracted `<script>` block.
 struct ScriptBlock {
@@ -111,18 +109,18 @@ fn extract_at_alias_imports(
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "import_statement" {
-            if let Some(source_node) = child.child_by_field_name("source") {
-                let import_path = source_node
-                    .utf8_text(source.as_bytes())
-                    .unwrap_or("")
-                    .trim_matches(|c| c == '\'' || c == '"')
-                    .to_string();
-                if import_path.starts_with("@/") {
-                    imports.push(ImportInfo {
-                        source: import_path,
-                    });
-                }
+        if child.kind() == "import_statement"
+            && let Some(source_node) = child.child_by_field_name("source")
+        {
+            let import_path = source_node
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_string();
+            if import_path.starts_with("@/") {
+                imports.push(ImportInfo {
+                    source: import_path,
+                });
             }
         }
     }
@@ -211,15 +209,26 @@ const handleClick = () => count.value++
 
         // handleClick is an arrow function
         let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"handleClick"), "Expected handleClick, got {:?}", names);
+        assert!(
+            names.contains(&"handleClick"),
+            "Expected handleClick, got {:?}",
+            names
+        );
 
         // Relative import should be extracted
         let import_sources: Vec<&str> = imports.iter().map(|i| i.source.as_str()).collect();
-        assert!(import_sources.contains(&"MyChild.vue"), "Expected MyChild.vue import, got {:?}", import_sources);
+        assert!(
+            import_sources.contains(&"MyChild.vue"),
+            "Expected MyChild.vue import, got {:?}",
+            import_sources
+        );
 
         // Line numbers should be offset by the script block start
         let handle_click = functions.iter().find(|f| f.name == "handleClick").unwrap();
-        assert_eq!(handle_click.line_start, 10, "handleClick should be at line 10 of the .vue file");
+        assert_eq!(
+            handle_click.line_start, 10,
+            "handleClick should be at line 10 of the .vue file"
+        );
     }
 
     #[test]
@@ -237,7 +246,11 @@ export default function setup() {
         extract_nodes(source, &mut functions, &mut classes, &mut imports);
 
         let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"setup"), "Expected setup function, got {:?}", names);
+        assert!(
+            names.contains(&"setup"),
+            "Expected setup function, got {:?}",
+            names
+        );
     }
 
     #[test]
