@@ -52,6 +52,21 @@ pub struct ThresholdConfig {
     /// Max coupling for over-engineering signal.
     #[serde(default = "default_over_engineering")]
     pub over_engineering_coupling: f64,
+    /// Minimum complexity for god module signal.
+    #[serde(default = "default_god_module_complexity")]
+    pub god_module_complexity: u32,
+    /// Minimum LOC for god module signal.
+    #[serde(default = "default_god_module_loc")]
+    pub god_module_loc: u32,
+    /// Minimum fan-out for god module signal.
+    #[serde(default = "default_god_module_fan_out")]
+    pub god_module_fan_out: usize,
+    /// Minimum number of co-changing files for shotgun surgery signal.
+    #[serde(default = "default_shotgun_surgery_breadth")]
+    pub shotgun_surgery_breadth: usize,
+    /// Instability gap for unstable dependency signal (stable - unstable).
+    #[serde(default = "default_unstable_dep_gap")]
+    pub unstable_dep_gap: f64,
 }
 
 /// Percentile thresholds for node-level signals.
@@ -104,6 +119,21 @@ fn default_fragile_fault() -> f64 {
 fn default_over_engineering() -> f64 {
     0.05
 }
+fn default_god_module_complexity() -> u32 {
+    50
+}
+fn default_god_module_loc() -> u32 {
+    500
+}
+fn default_god_module_fan_out() -> usize {
+    15
+}
+fn default_shotgun_surgery_breadth() -> usize {
+    8
+}
+fn default_unstable_dep_gap() -> f64 {
+    0.4
+}
 fn default_p10() -> u32 {
     10
 }
@@ -134,6 +164,11 @@ impl Default for ThresholdConfig {
             fragile_boundary_coupling: default_fragile_coupling(),
             fragile_boundary_fault_prop: default_fragile_fault(),
             over_engineering_coupling: default_over_engineering(),
+            god_module_complexity: default_god_module_complexity(),
+            god_module_loc: default_god_module_loc(),
+            god_module_fan_out: default_god_module_fan_out(),
+            shotgun_surgery_breadth: default_shotgun_surgery_breadth(),
+            unstable_dep_gap: default_unstable_dep_gap(),
         }
     }
 }
