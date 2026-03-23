@@ -103,12 +103,8 @@ pub fn build_structural_graph(
                         && target_id.ends_with(".go")
                         && *target_id != result.module_id
                     {
-                        let _ = graph.add_edge(
-                            &result.module_id,
-                            target_id,
-                            EdgeType::Imports,
-                            1.0,
-                        );
+                        let _ =
+                            graph.add_edge(&result.module_id, target_id, EdgeType::Imports, 1.0);
                     }
                 }
             }
@@ -676,7 +672,9 @@ func (s MyStruct) ValueMethod() string {
             "Expected node service.go::MyStruct::Method"
         );
         assert!(
-            graph.get_node("service.go::MyStruct::ValueMethod").is_some(),
+            graph
+                .get_node("service.go::MyStruct::ValueMethod")
+                .is_some(),
             "Expected node service.go::MyStruct::ValueMethod"
         );
     }
@@ -747,11 +745,22 @@ func complexFunc(x int) int {
 
     #[test]
     fn test_go_stdlib_import_ignored() {
-        let result = languages::go::resolve_go_import("fmt", "main.go", Some("github.com/user/project"));
-        assert!(result.is_none(), "Standard library imports should be ignored");
+        let result =
+            languages::go::resolve_go_import("fmt", "main.go", Some("github.com/user/project"));
+        assert!(
+            result.is_none(),
+            "Standard library imports should be ignored"
+        );
 
-        let result = languages::go::resolve_go_import("net/http", "main.go", Some("github.com/user/project"));
-        assert!(result.is_none(), "Standard library imports should be ignored");
+        let result = languages::go::resolve_go_import(
+            "net/http",
+            "main.go",
+            Some("github.com/user/project"),
+        );
+        assert!(
+            result.is_none(),
+            "Standard library imports should be ignored"
+        );
     }
 
     #[test]

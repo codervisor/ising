@@ -411,16 +411,18 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             .collect();
 
         // Only report cycles involving source files, skip generated code
-        if !cycle_ids.iter().all(|id| is_source_file(id) && !is_generated_code(id)) {
+        if !cycle_ids
+            .iter()
+            .all(|id| is_source_file(id) && !is_generated_code(id))
+        {
             continue;
         }
 
         // Check that the SCC is actually connected via structural edges
         let has_structural = scc.iter().any(|&idx| {
-            graph
-                .graph
-                .edges(idx)
-                .any(|e| e.weight().edge_type.layer() == EdgeLayer::Structural && scc.contains(&e.target()))
+            graph.graph.edges(idx).any(|e| {
+                e.weight().edge_type.layer() == EdgeLayer::Structural && scc.contains(&e.target())
+            })
         });
         if !has_structural {
             continue;
@@ -469,7 +471,8 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             && !is_test_file(node_id)
             && !is_generated_code(node_id)
         {
-            let severity = (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (fan_out as f64 / 15.0);
+            let severity =
+                (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (fan_out as f64 / 15.0);
             signals.push(Signal::new(
                 SignalType::GodModule,
                 node_id,

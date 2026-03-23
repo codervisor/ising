@@ -67,7 +67,13 @@ pub fn extract_nodes(
                 extract_type_declaration(child, source, classes);
             }
             "import_declaration" => {
-                extract_imports(child, source, relative_path, module_path.as_deref(), imports);
+                extract_imports(
+                    child,
+                    source,
+                    relative_path,
+                    module_path.as_deref(),
+                    imports,
+                );
             }
             _ => {}
         }
@@ -141,21 +147,18 @@ fn extract_imports(
     for child in node.children(&mut cursor) {
         match child.kind() {
             "import_spec" => {
-                if let Some(path) =
-                    resolve_import_spec(child, source, relative_path, module_path)
-                {
+                if let Some(path) = resolve_import_spec(child, source, relative_path, module_path) {
                     imports.push(ImportInfo { source: path });
                 }
             }
             "import_spec_list" => {
                 let mut list_cursor = child.walk();
                 for spec in child.children(&mut list_cursor) {
-                    if spec.kind() == "import_spec" {
-                        if let Some(path) =
+                    if spec.kind() == "import_spec"
+                        && let Some(path) =
                             resolve_import_spec(spec, source, relative_path, module_path)
-                        {
-                            imports.push(ImportInfo { source: path });
-                        }
+                    {
+                        imports.push(ImportInfo { source: path });
                     }
                 }
             }
@@ -166,8 +169,7 @@ fn extract_imports(
                     .unwrap_or("")
                     .trim_matches('"')
                     .to_string();
-                if let Some(resolved) =
-                    resolve_go_import(&import_path, relative_path, module_path)
+                if let Some(resolved) = resolve_go_import(&import_path, relative_path, module_path)
                 {
                     imports.push(ImportInfo { source: resolved });
                 }
