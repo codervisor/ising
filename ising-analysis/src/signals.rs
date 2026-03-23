@@ -410,8 +410,8 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             .map(|&idx| graph.graph[idx].id.as_str())
             .collect();
 
-        // Only report cycles involving source files
-        if !cycle_ids.iter().all(|id| is_source_file(id)) {
+        // Only report cycles involving source files, skip generated code
+        if !cycle_ids.iter().all(|id| is_source_file(id) && !is_generated_code(id)) {
             continue;
         }
 
@@ -467,6 +467,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             && loc >= thresholds.god_module_loc
             && fan_out >= thresholds.god_module_fan_out
             && !is_test_file(node_id)
+            && !is_generated_code(node_id)
         {
             let severity = (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (fan_out as f64 / 15.0);
             signals.push(Signal::new(
@@ -620,6 +621,31 @@ fn extract_crate_prefix(path: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// Check if a path is generated code (protobuf, code generators, etc.).
+/// These files have high complexity/LOC/fan-out but are machine-generated
+/// and not actionable for refactoring.
+fn is_generated_code(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    // Protobuf generated files
+    filename.ends_with(".pb.go")
+        || filename.ends_with("_pb.go")
+        || filename.ends_with(".pb.ts")
+        || filename.ends_with("_pb.ts")
+        || filename.ends_with("_pb2.py")
+        || filename.ends_with("_pb2_grpc.py")
+        // gRPC generated files
+        || filename.ends_with("_grpc.pb.go")
+        // General code generation patterns
+        || filename.ends_with(".generated.ts")
+        || filename.ends_with(".generated.go")
+        || filename.ends_with(".generated.rs")
+        || filename.ends_with(".g.dart")
+        // OpenAPI / Swagger generated
+        || path.contains("/generated/")
+        || path.contains("/gen/")
+        && (filename.ends_with(".go") || filename.ends_with(".ts") || filename.ends_with(".py"))
 }
 
 fn is_reexport_module(path: &str) -> bool {
@@ -1144,6 +1170,47 @@ mod tests {
                 .iter()
                 .any(|s| s.signal_type == SignalType::UnstableDependency),
             "Modules with similar stability should not trigger signal"
+        );
+    }
+
+    // --- Generated code filtering tests ---
+
+    #[test]
+    fn test_is_generated_code() {
+        assert!(is_generated_code("grpc/model_service_v2_request.pb.go"));
+        assert!(is_generated_code("grpc/service_grpc.pb.go"));
+        assert!(is_generated_code("api/types_pb.ts"));
+        assert!(is_generated_code("proto/model_pb2.py"));
+        assert!(is_generated_code("proto/model_pb2_grpc.py"));
+        assert!(is_generated_code("src/schema.generated.ts"));
+        assert!(is_generated_code("lib/model.g.dart"));
+        assert!(!is_generated_code("vcs/git.go"));
+        assert!(!is_generated_code("src/main.rs"));
+        assert!(!is_generated_code("api/handler.ts"));
+    }
+
+    #[test]
+    fn test_no_god_module_for_generated_code() {
+        let mut g = UnifiedGraph::new();
+        // A generated protobuf file with god-module-level metrics
+        let mut pb = Node::module("grpc/model.pb.go", "grpc/model.pb.go");
+        pb.complexity = Some(200);
+        pb.loc = Some(2000);
+        g.add_node(pb);
+
+        for i in 0..25 {
+            let dep = format!("dep{}.go", i);
+            g.add_node(Node::module(dep.clone(), dep.clone()));
+            g.add_edge("grpc/model.pb.go", &dep, EdgeType::Imports, 1.0)
+                .unwrap();
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GodModule),
+            "Generated .pb.go files should not trigger GodModule"
         );
     }
 }
