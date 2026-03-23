@@ -7,6 +7,7 @@ description = "Cross-layer signal detection for the Ising code graph engine"
 
 [dependencies]
 ising-core = { path = "../ising-core" }
+petgraph.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

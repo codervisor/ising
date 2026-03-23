@@ -4,8 +4,9 @@
 //! from any single layer alone.
 
 use ising_core::config::Config;
-use ising_core::graph::{EdgeType, UnifiedGraph};
+use ising_core::graph::{EdgeLayer, EdgeType, UnifiedGraph};
 use ising_core::metrics::{compute_node_metrics, percentile};
+use petgraph::visit::EdgeRef;
 use serde::Serialize;
 
 /// Types of cross-layer signals.
@@ -22,13 +23,26 @@ pub enum SignalType {
     StableCore,
     /// High hotspot + high defects + high coupling — most dangerous code.
     TickingBomb,
+    /// Circular dependency between modules — architectural entanglement.
+    DependencyCycle,
+    /// Extreme complexity + LOC + fan-out — does too much, hard to maintain.
+    GodModule,
+    /// One file's changes scatter across many other files — scattered responsibility.
+    ShotgunSurgery,
+    /// Stable module depends on unstable module — Stable Dependencies Principle violation.
+    UnstableDependency,
 }
 
 impl SignalType {
     pub fn priority(&self) -> &'static str {
         match self {
-            SignalType::FragileBoundary | SignalType::TickingBomb => "critical",
-            SignalType::GhostCoupling => "high",
+            SignalType::FragileBoundary | SignalType::TickingBomb | SignalType::DependencyCycle => {
+                "critical"
+            }
+            SignalType::GhostCoupling
+            | SignalType::GodModule
+            | SignalType::ShotgunSurgery
+            | SignalType::UnstableDependency => "high",
             SignalType::StableCore => "guard",
             SignalType::OverEngineering => "info",
         }
@@ -377,6 +391,153 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                 format!(
                     "Complex ({:.2} hotspot), buggy ({:.2} defect density), highly coupled ({:.2}). Refactor before making changes.",
                     hotspot, defect_d, sum_coupling
+                ),
+            ));
+        }
+    }
+
+    // --- Dependency Cycle detection ---
+    // Use Tarjan's SCC to find circular dependency chains.
+    // Only consider structural edges to find real import cycles.
+    let sccs = petgraph::algo::tarjan_scc(&graph.graph);
+    for scc in &sccs {
+        if scc.len() < 2 {
+            continue;
+        }
+        // Collect node IDs in this cycle
+        let cycle_ids: Vec<&str> = scc
+            .iter()
+            .map(|&idx| graph.graph[idx].id.as_str())
+            .collect();
+
+        // Only report cycles involving source files
+        if !cycle_ids.iter().all(|id| is_source_file(id)) {
+            continue;
+        }
+
+        // Check that the SCC is actually connected via structural edges
+        let has_structural = scc.iter().any(|&idx| {
+            graph
+                .graph
+                .edges(idx)
+                .any(|e| e.weight().edge_type.layer() == EdgeLayer::Structural && scc.contains(&e.target()))
+        });
+        if !has_structural {
+            continue;
+        }
+
+        let severity = cycle_ids.len() as f64 * 0.5; // longer cycles are worse
+        let cycle_desc = if cycle_ids.len() <= 5 {
+            cycle_ids.join(" → ")
+        } else {
+            format!(
+                "{} → ... → {} ({} modules)",
+                cycle_ids[0],
+                cycle_ids[cycle_ids.len() - 1],
+                cycle_ids.len()
+            )
+        };
+
+        signals.push(Signal::new(
+            SignalType::DependencyCycle,
+            cycle_ids[0],
+            cycle_ids.get(1).copied(),
+            severity,
+            format!(
+                "Circular dependency: {}. Break the cycle to improve modularity.",
+                cycle_desc
+            ),
+        ));
+    }
+
+    // --- God Module detection ---
+    // Files with extreme complexity, LOC, and fan-out — doing too much.
+    for node_id in &node_ids {
+        let node = match graph.get_node(node_id) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let complexity = node.complexity.unwrap_or(0);
+        let loc = node.loc.unwrap_or(0);
+        let metrics = compute_node_metrics(graph, node_id);
+        let fan_out = metrics.fan_out;
+
+        if complexity >= thresholds.god_module_complexity
+            && loc >= thresholds.god_module_loc
+            && fan_out >= thresholds.god_module_fan_out
+            && !is_test_file(node_id)
+        {
+            let severity = (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (fan_out as f64 / 15.0);
+            signals.push(Signal::new(
+                SignalType::GodModule,
+                node_id,
+                None,
+                severity,
+                format!(
+                    "God module: complexity {}, {} LOC, {} outgoing dependencies. Split into focused modules.",
+                    complexity, loc, fan_out
+                ),
+            ));
+        }
+    }
+
+    // --- Shotgun Surgery detection ---
+    // Files whose changes scatter across many other files.
+    // Detected via co-change breadth: count distinct files that co-change with this file.
+    let mut co_change_breadth: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for (a, b, _coupling) in &co_change_edges {
+        *co_change_breadth.entry(a).or_default() += 1;
+        *co_change_breadth.entry(b).or_default() += 1;
+    }
+
+    for (node_id, breadth) in &co_change_breadth {
+        if *breadth >= thresholds.shotgun_surgery_breadth
+            && is_source_file(node_id)
+            && !is_test_file(node_id)
+        {
+            let severity = *breadth as f64 / thresholds.shotgun_surgery_breadth as f64;
+            signals.push(Signal::new(
+                SignalType::ShotgunSurgery,
+                node_id,
+                None,
+                severity,
+                format!(
+                    "Shotgun surgery: changes to this file co-change with {} other files. Consolidate scattered responsibilities.",
+                    breadth
+                ),
+            ));
+        }
+    }
+
+    // --- Unstable Dependency detection ---
+    // Stable module (low instability) depending on unstable module (high instability).
+    // Violates the Stable Dependencies Principle: dependencies should flow toward stability.
+    for (a, b, _) in &import_edges {
+        let metrics_a = compute_node_metrics(graph, a);
+        let metrics_b = compute_node_metrics(graph, b);
+
+        // A is stable (low instability), B is unstable (high instability)
+        // and the gap is significant
+        let gap = metrics_b.instability - metrics_a.instability;
+        if gap >= thresholds.unstable_dep_gap
+            && metrics_a.instability < 0.3
+            && metrics_b.instability > 0.7
+            && is_source_file(a)
+            && is_source_file(b)
+            && !is_test_file(a)
+            && !is_reexport_module(a)
+            && !is_reexport_module(b)
+        {
+            signals.push(Signal::new(
+                SignalType::UnstableDependency,
+                a,
+                Some(b),
+                gap,
+                format!(
+                    "Stable module (instability {:.2}) depends on unstable module (instability {:.2}). Dependencies should flow toward stability.",
+                    metrics_a.instability, metrics_b.instability
                 ),
             ));
         }
@@ -783,6 +944,206 @@ mod tests {
                 .iter()
                 .any(|s| s.signal_type == SignalType::GhostCoupling),
             "Ghost coupling should still fire for same-crate files without a common parent"
+        );
+    }
+
+    // --- DependencyCycle tests ---
+
+    #[test]
+    fn test_dependency_cycle_detected() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("b.py", "a.py", EdgeType::Imports, 1.0).unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::DependencyCycle),
+            "Should detect circular dependency between a.py and b.py"
+        );
+    }
+
+    #[test]
+    fn test_no_dependency_cycle_for_acyclic() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_node(Node::module("c.py", "c.py"));
+        g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("b.py", "c.py", EdgeType::Imports, 1.0).unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::DependencyCycle),
+            "Acyclic graph should not trigger dependency cycle signal"
+        );
+    }
+
+    #[test]
+    fn test_dependency_cycle_three_nodes() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.rs", "a.rs"));
+        g.add_node(Node::module("b.rs", "b.rs"));
+        g.add_node(Node::module("c.rs", "c.rs"));
+        g.add_edge("a.rs", "b.rs", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("b.rs", "c.rs", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("c.rs", "a.rs", EdgeType::Imports, 1.0).unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        let cycle = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::DependencyCycle);
+        assert!(cycle.is_some(), "Should detect 3-node cycle");
+        // Severity should be proportional to cycle length
+        assert!(
+            cycle.unwrap().severity >= 1.5,
+            "3-node cycle should have severity >= 1.5"
+        );
+    }
+
+    // --- GodModule tests ---
+
+    #[test]
+    fn test_god_module_detected() {
+        let mut g = UnifiedGraph::new();
+        // Create a god module with high complexity, LOC, and fan-out
+        let mut god = Node::module("god.py", "god.py");
+        god.complexity = Some(80);
+        god.loc = Some(1200);
+        g.add_node(god);
+
+        // Add many import targets to give it high fan-out
+        for i in 0..20 {
+            let dep_id = format!("dep{}.py", i);
+            g.add_node(Node::module(dep_id.clone(), dep_id.clone()));
+            g.add_edge("god.py", &dep_id, EdgeType::Imports, 1.0)
+                .unwrap();
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GodModule),
+            "Should detect god module with high complexity, LOC, and fan-out"
+        );
+    }
+
+    #[test]
+    fn test_no_god_module_for_simple_file() {
+        let mut g = UnifiedGraph::new();
+        let mut simple = Node::module("simple.py", "simple.py");
+        simple.complexity = Some(5);
+        simple.loc = Some(50);
+        g.add_node(simple);
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GodModule),
+            "Simple files should not trigger god module"
+        );
+    }
+
+    // --- ShotgunSurgery tests ---
+
+    #[test]
+    fn test_shotgun_surgery_detected() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("core.py", "core.py"));
+        // Create many files that co-change with core.py
+        for i in 0..10 {
+            let dep_id = format!("dep{}.py", i);
+            g.add_node(Node::module(dep_id.clone(), dep_id.clone()));
+            g.add_edge("core.py", &dep_id, EdgeType::CoChanges, 0.6)
+                .unwrap();
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::ShotgunSurgery),
+            "Should detect shotgun surgery when many files co-change"
+        );
+    }
+
+    #[test]
+    fn test_no_shotgun_surgery_for_few_cochanges() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_node(Node::module("c.py", "c.py"));
+        g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.6)
+            .unwrap();
+        g.add_edge("a.py", "c.py", EdgeType::CoChanges, 0.6)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::ShotgunSurgery),
+            "Few co-changes should not trigger shotgun surgery"
+        );
+    }
+
+    // --- UnstableDependency tests ---
+
+    #[test]
+    fn test_unstable_dependency_detected() {
+        let mut g = UnifiedGraph::new();
+        // A: stable (high fan-in, no fan-out besides this import)
+        g.add_node(Node::module("stable.py", "stable.py"));
+        // Give stable.py high fan-in from many consumers
+        for i in 0..5 {
+            let consumer = format!("consumer{}.py", i);
+            g.add_node(Node::module(consumer.clone(), consumer.clone()));
+            g.add_edge(&consumer, "stable.py", EdgeType::Imports, 1.0)
+                .unwrap();
+        }
+
+        // B: unstable (no fan-in, high fan-out)
+        g.add_node(Node::module("unstable.py", "unstable.py"));
+        for i in 0..5 {
+            let dep = format!("lib{}.py", i);
+            g.add_node(Node::module(dep.clone(), dep.clone()));
+            g.add_edge("unstable.py", &dep, EdgeType::Imports, 1.0)
+                .unwrap();
+        }
+
+        // Stable depends on unstable — SDP violation
+        g.add_edge("stable.py", "unstable.py", EdgeType::Imports, 1.0)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::UnstableDependency),
+            "Should detect stable module depending on unstable module"
+        );
+    }
+
+    #[test]
+    fn test_no_unstable_dependency_for_same_stability() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a.py", "a.py"));
+        g.add_node(Node::module("b.py", "b.py"));
+        g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::UnstableDependency),
+            "Modules with similar stability should not trigger signal"
         );
     }
 }
