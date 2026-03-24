@@ -71,6 +71,86 @@ pub struct VizExport {
 }
 
 impl Database {
+    /// Export graph as Graphviz DOT format.
+    pub fn get_dot_export(&self) -> Result<String, DbError> {
+        let mut out = String::from("digraph ising {\n  rankdir=LR;\n  node [shape=box];\n\n");
+
+        let signals = self.get_signals(None, None)?;
+        let hotspots = self.get_hotspots(50)?;
+
+        for (id, score, _, _) in &hotspots {
+            let color = if *score > 0.7 {
+                "red"
+            } else if *score > 0.4 {
+                "orange"
+            } else {
+                "lightblue"
+            };
+            let label = id.replace('"', "\\\"");
+            out.push_str(&format!(
+                "  \"{}\" [label=\"{}\\n{:.2}\", style=filled, fillcolor={}];\n",
+                id, label, score, color
+            ));
+        }
+
+        for signal in &signals {
+            if let Some(node_b) = &signal.node_b {
+                let style = match signal.signal_type.as_str() {
+                    "ghost_coupling" => "style=dashed, color=purple",
+                    "fragile_boundary" => "style=bold, color=red",
+                    "over_engineering" => "style=dotted, color=gray",
+                    _ => "color=black",
+                };
+                out.push_str(&format!(
+                    "  \"{}\" -> \"{}\" [{}, label=\"{}\"];\n",
+                    signal.node_a, node_b, style, signal.signal_type
+                ));
+            }
+        }
+
+        out.push_str("}\n");
+        Ok(out)
+    }
+
+    /// Export graph as Mermaid diagram format.
+    pub fn get_mermaid_export(&self) -> Result<String, DbError> {
+        let mut out = String::from("graph LR\n");
+
+        let signals = self.get_signals(None, None)?;
+        let hotspots = self.get_hotspots(50)?;
+
+        for (id, score, _, _) in &hotspots {
+            let safe_id = id.replace(['/', '.', ':'], "_");
+            let label = id.replace('"', "");
+            if *score > 0.7 {
+                out.push_str(&format!(
+                    "  {safe_id}[\"{label}\\n🔥 {score:.2}\"]:::hot\n"
+                ));
+            } else {
+                out.push_str(&format!("  {safe_id}[\"{label}\\n{score:.2}\"]\n"));
+            }
+        }
+
+        for signal in &signals {
+            if let Some(node_b) = &signal.node_b {
+                let safe_a = signal.node_a.replace(['/', '.', ':'], "_");
+                let safe_b = node_b.replace(['/', '.', ':'], "_");
+                let arrow = match signal.signal_type.as_str() {
+                    "ghost_coupling" => "-.->",
+                    "fragile_boundary" => "==>",
+                    _ => "-->",
+                };
+                out.push_str(&format!(
+                    "  {safe_a} {arrow}|{}| {safe_b}\n",
+                    signal.signal_type
+                ));
+            }
+        }
+
+        out.push_str("  classDef hot fill:#f96,stroke:#333\n");
+        Ok(out)
+    }
+
     /// Export full graph state as viz-json for the SPA.
     pub fn get_viz_export(&self) -> Result<VizExport, DbError> {
         // Metadata

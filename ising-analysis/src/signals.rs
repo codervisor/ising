@@ -3,7 +3,7 @@
 //! Each signal is a comparison between layers that reveals patterns invisible
 //! from any single layer alone.
 
-use ising_core::config::Config;
+use ising_core::config::{Config, ThresholdConfig};
 use ising_core::graph::{EdgeLayer, EdgeType, UnifiedGraph};
 use ising_core::metrics::{compute_node_metrics, percentile};
 use petgraph::visit::EdgeRef;
@@ -79,88 +79,124 @@ impl Signal {
 
 /// Detect all cross-layer signals in the unified graph.
 pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
+    let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
+    let import_edges = graph.edges_of_type(&EdgeType::Imports);
+    let node_ids: Vec<String> = graph.node_ids().map(|s| s.to_string()).collect();
+
     let mut signals = Vec::new();
+    signals.extend(detect_ghost_coupling(
+        &co_change_edges,
+        &import_edges,
+        graph,
+        &config.thresholds,
+    ));
+    signals.extend(detect_fragile_boundaries(
+        &co_change_edges,
+        graph,
+        &config.thresholds,
+    ));
+    signals.extend(detect_over_engineering(
+        &import_edges,
+        graph,
+        &config.thresholds,
+    ));
+    signals.extend(detect_stable_cores(&node_ids, graph, config));
+    signals.extend(detect_ticking_bombs(&node_ids, graph, config));
+    signals.extend(detect_dependency_cycles(graph));
+    signals.extend(detect_god_modules(&node_ids, graph, &config.thresholds));
+    signals.extend(detect_shotgun_surgery(&co_change_edges, &config.thresholds));
+    signals.extend(detect_unstable_dependencies(
+        &import_edges,
+        graph,
+        &config.thresholds,
+    ));
 
-    let thresholds = &config.thresholds;
+    signals.sort_by(|a, b| {
+        b.severity
+            .partial_cmp(&a.severity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    signals
+}
 
-    // --- Edge-level signals ---
-
-    // Precompute importer index: for each node, the set of nodes that import it.
-    // Used for common-parent suppression in ghost coupling detection.
-    let import_edges_all = graph.edges_of_type(&EdgeType::Imports);
+fn detect_ghost_coupling(
+    co_change_edges: &[(&str, &str, f64)],
+    import_edges: &[(&str, &str, f64)],
+    graph: &UnifiedGraph,
+    thresholds: &ThresholdConfig,
+) -> Vec<Signal> {
+    // Build importer index for common-parent suppression.
     let mut importers: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
         std::collections::HashMap::new();
-    for (src, tgt, _) in &import_edges_all {
+    for (src, tgt, _) in import_edges {
         importers.entry(tgt).or_default().insert(src);
     }
 
-    // Iterate over co-change edges (Layer 2)
-    let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
-    for (a, b, coupling) in &co_change_edges {
-        let has_structural = graph.has_structural_edge(a, b);
-        let fault_prop = graph
-            .edge_weight(a, b, &EdgeType::FaultPropagates)
-            .unwrap_or(0.0);
-
-        // Ghost Coupling: no structural dep but high temporal coupling
-        // Skip test↔source pairs and non-source-file pairs (directories, configs)
-        if !has_structural
-            && *coupling > thresholds.ghost_coupling_threshold
-            && !is_test_source_pair(a, b)
-            && is_source_file(a)
-            && is_source_file(b)
+    let mut signals = Vec::new();
+    for (a, b, coupling) in co_change_edges {
+        if graph.has_structural_edge(a, b)
+            || *coupling <= thresholds.ghost_coupling_threshold
+            || is_test_source_pair(a, b)
+            || !is_source_file(a)
+            || !is_source_file(b)
         {
-            // Common-parent suppression: if both A and B share a common importer,
-            // their co-change is explained by the shared parent orchestrating both.
-            let empty = std::collections::HashSet::new();
-            let importers_a = importers.get(a).unwrap_or(&empty);
-            let importers_b = importers.get(b).unwrap_or(&empty);
-            let shared_parents: Vec<&&str> = importers_a.intersection(importers_b).collect();
+            continue;
+        }
 
-            // Also check for cross-crate siblings: files in different workspace
-            // crates co-change due to shared workspace orchestration, but cross-crate
-            // imports aren't tracked as structural edges.
-            let has_shared_parent = !shared_parents.is_empty() || is_cross_crate_pair(a, b);
+        let empty = std::collections::HashSet::new();
+        let importers_a = importers.get(a).unwrap_or(&empty);
+        let importers_b = importers.get(b).unwrap_or(&empty);
+        let shared_parents: Vec<&&str> = importers_a.intersection(importers_b).collect();
+        let has_shared_parent = !shared_parents.is_empty() || is_cross_crate_pair(a, b);
 
-            if has_shared_parent {
-                // Shared parent exists — suppress or reduce severity
-                if *coupling >= 0.9 {
-                    // Very high coupling: still emit at reduced severity with explanation
-                    let parent_names: Vec<&str> = shared_parents.iter().map(|s| **s).collect();
-                    let parent_desc = if parent_names.is_empty() {
-                        "workspace orchestration".to_string()
-                    } else {
-                        parent_names.join(", ")
-                    };
-                    signals.push(Signal::new(
-                        SignalType::GhostCoupling,
-                        a,
-                        Some(b),
-                        *coupling * 0.3,
-                        format!(
-                            "No structural dependency, but {:.0}% co-change rate. Co-change likely explained by shared parent {}, but coupling is very high — verify no hidden dependency.",
-                            coupling * 100.0,
-                            parent_desc
-                        ),
-                    ));
-                }
-                // If coupling < 0.9: skip signal entirely
-            } else {
+        if has_shared_parent {
+            // Suppress unless coupling is very high (≥0.9), in which case emit at reduced severity.
+            if *coupling >= 0.9 {
+                let parent_names: Vec<&str> = shared_parents.iter().map(|s| **s).collect();
+                let parent_desc = if parent_names.is_empty() {
+                    "workspace orchestration".to_string()
+                } else {
+                    parent_names.join(", ")
+                };
                 signals.push(Signal::new(
                     SignalType::GhostCoupling,
                     a,
                     Some(b),
-                    *coupling,
+                    *coupling * 0.3,
                     format!(
-                        "No structural dependency, but {:.0}% co-change rate. Likely missing an abstraction layer.",
-                        coupling * 100.0
+                        "No structural dependency, but {:.0}% co-change rate. Co-change likely explained by shared parent {}, but coupling is very high — verify no hidden dependency.",
+                        coupling * 100.0,
+                        parent_desc
                     ),
                 ));
             }
+        } else {
+            signals.push(Signal::new(
+                SignalType::GhostCoupling,
+                a,
+                Some(b),
+                *coupling,
+                format!(
+                    "No structural dependency, but {:.0}% co-change rate. Likely missing an abstraction layer.",
+                    coupling * 100.0
+                ),
+            ));
         }
+    }
+    signals
+}
 
-        // Fragile Boundary: structural dep + high co-change + fault propagation
-        if has_structural
+fn detect_fragile_boundaries(
+    co_change_edges: &[(&str, &str, f64)],
+    graph: &UnifiedGraph,
+    thresholds: &ThresholdConfig,
+) -> Vec<Signal> {
+    let mut signals = Vec::new();
+    for (a, b, coupling) in co_change_edges {
+        let fault_prop = graph
+            .edge_weight(a, b, &EdgeType::FaultPropagates)
+            .unwrap_or(0.0);
+        if graph.has_structural_edge(a, b)
             && *coupling > thresholds.fragile_boundary_coupling
             && fault_prop > thresholds.fragile_boundary_fault_prop
         {
@@ -168,7 +204,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                 SignalType::FragileBoundary,
                 a,
                 Some(b),
-                coupling * fault_prop * 10.0, // amplify severity
+                coupling * fault_prop * 10.0,
                 format!(
                     "Structural dep + {:.0}% co-change + {:.0}% fault propagation. Interface is fragile.",
                     coupling * 100.0,
@@ -177,7 +213,14 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             ));
         }
     }
+    signals
+}
 
+fn detect_over_engineering(
+    import_edges: &[(&str, &str, f64)],
+    graph: &UnifiedGraph,
+    thresholds: &ThresholdConfig,
+) -> Vec<Signal> {
     // Over-Engineering: detect likely unnecessary abstractions
     //
     // A low co-change rate between A→B is NOT a signal by itself — most stable,
@@ -189,36 +232,27 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     //
     // 2. Pass-through module: A→B→C where A and C co-change but B never does.
     //    B is an indirection layer adding no value.
-    //
-    // We skip re-export modules (__init__.py, index.ts) which naturally have
-    // many low-activity imports, and deduplicate multiple imports between the
-    // same pair.
-    let import_edges = graph.edges_of_type(&EdgeType::Imports);
 
-    // Precompute structural fan-in (import edges incoming) per node
     let mut fan_in_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (_, target, _) in &import_edges {
+    for (_, target, _) in import_edges {
         *fan_in_map.entry(target).or_default() += 1;
     }
 
-    // Build adjacency list for import edges (for pass-through detection)
     let mut import_targets: std::collections::HashMap<&str, Vec<&str>> =
         std::collections::HashMap::new();
-    for (src, tgt, _) in &import_edges {
+    for (src, tgt, _) in import_edges {
         import_targets.entry(src).or_default().push(tgt);
     }
 
+    let mut signals = Vec::new();
     let mut seen_import_pairs = std::collections::HashSet::new();
-    for (a, b, _) in &import_edges {
-        // Skip re-export modules — these are package entry points with many low-activity imports
+    for (a, b, _) in import_edges {
         if is_reexport_module(a) || is_reexport_module(b) {
             continue;
         }
-        // Skip documentation examples — they naturally import core code with fan-in=1
         if is_docs_example(a) || is_docs_example(b) {
             continue;
         }
-        // Deduplicate: multiple imports between same pair (e.g. 5 `from .globals import X`)
         let pair: (String, String) = if a < b {
             (a.to_string(), b.to_string())
         } else {
@@ -229,8 +263,6 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         }
 
         let coupling_ab = graph.edge_weight(a, b, &EdgeType::CoChanges).unwrap_or(0.0);
-
-        // Skip if they do co-change — the dependency is actively used
         if coupling_ab >= thresholds.over_engineering_coupling {
             continue;
         }
@@ -244,7 +276,6 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         let b_complexity = graph.get_node(b).and_then(|n| n.complexity).unwrap_or(0);
 
         // Signal 1: Single-consumer wrapper
-        // B has exactly one consumer (A), B is low-complexity, and B rarely changes
         if b_fan_in == 1 && b_complexity <= 5 && b_change_freq <= 1 {
             signals.push(Signal::new(
                 SignalType::OverEngineering,
@@ -259,13 +290,11 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             continue;
         }
 
-        // Signal 2: Pass-through module
-        // A→B→C where A↔C co-change but A↔B and B↔C don't
+        // Signal 2: Pass-through module (A→B→C where A↔C co-change but B is dormant)
         if let Some(b_targets) = import_targets.get(b) {
             for c in b_targets {
                 let coupling_ac = graph.edge_weight(a, c, &EdgeType::CoChanges).unwrap_or(0.0);
                 let coupling_bc = graph.edge_weight(b, c, &EdgeType::CoChanges).unwrap_or(0.0);
-
                 if coupling_ac > thresholds.ghost_coupling_threshold
                     && coupling_bc < thresholds.over_engineering_coupling
                 {
@@ -279,16 +308,19 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                             a, b, c, a, c, coupling_ac * 100.0, b
                         ),
                     ));
-                    break; // one signal per A→B edge is enough
+                    break;
                 }
             }
         }
     }
+    signals
+}
 
-    // --- Node-level signals ---
-    // Collect metrics for percentile computation
-    let node_ids: Vec<String> = graph.node_ids().map(|s| s.to_string()).collect();
-
+fn detect_stable_cores(
+    node_ids: &[String],
+    graph: &UnifiedGraph,
+    config: &Config,
+) -> Vec<Signal> {
     let mut change_freqs: Vec<f64> = node_ids
         .iter()
         .filter_map(|id| {
@@ -298,64 +330,20 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                 .map(|m| m.change_freq as f64)
         })
         .collect();
-
     let mut fan_ins: Vec<f64> = node_ids
         .iter()
         .map(|id| compute_node_metrics(graph, id).fan_in as f64)
         .collect();
 
-    let mut hotspots: Vec<f64> = node_ids
-        .iter()
-        .filter_map(|id| {
-            graph
-                .change_metrics
-                .get(id.as_str())
-                .map(|m| m.hotspot_score)
-        })
-        .collect();
-
-    let mut defect_densities: Vec<f64> = node_ids
-        .iter()
-        .filter_map(|id| {
-            graph
-                .defect_metrics
-                .get(id.as_str())
-                .map(|m| m.defect_density)
-        })
-        .collect();
-
-    let mut sum_couplings: Vec<f64> = node_ids
-        .iter()
-        .filter_map(|id| {
-            graph
-                .change_metrics
-                .get(id.as_str())
-                .map(|m| m.sum_coupling)
-        })
-        .collect();
-
     let freq_p_low = percentile(&mut change_freqs, config.percentiles.stable_core_freq);
     let fan_in_p_high = percentile(&mut fan_ins, config.percentiles.stable_core_fan_in);
-    let hotspot_p_high = percentile(&mut hotspots, config.percentiles.ticking_bomb_hotspot);
-    let defect_p_high = percentile(
-        &mut defect_densities,
-        config.percentiles.ticking_bomb_defect,
-    );
-    let coupling_p_high = percentile(&mut sum_couplings, config.percentiles.ticking_bomb_coupling);
 
-    for node_id in &node_ids {
-        let metrics = compute_node_metrics(graph, node_id);
+    let mut signals = Vec::new();
+    for node_id in node_ids {
         let change = graph.change_metrics.get(node_id.as_str());
-        let defect = graph.defect_metrics.get(node_id.as_str());
-
         let freq = change.map(|m| m.change_freq as f64).unwrap_or(0.0);
-        let fan_in = metrics.fan_in as f64;
-        let hotspot = change.map(|m| m.hotspot_score).unwrap_or(0.0);
-        let defect_d = defect.map(|m| m.defect_density).unwrap_or(0.0);
-        let sum_coupling = change.map(|m| m.sum_coupling).unwrap_or(0.0);
+        let fan_in = compute_node_metrics(graph, node_id).fan_in as f64;
 
-        // Stable Core: low change freq + high fan-in + low defects
-        // Skip test files and documentation examples — not meaningful as "core"
         if freq > 0.0
             && freq <= freq_p_low
             && fan_in >= fan_in_p_high
@@ -374,8 +362,58 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                 ),
             ));
         }
+    }
+    signals
+}
 
-        // Ticking Bomb: high hotspot + high defects + high coupling
+fn detect_ticking_bombs(
+    node_ids: &[String],
+    graph: &UnifiedGraph,
+    config: &Config,
+) -> Vec<Signal> {
+    let mut hotspots: Vec<f64> = node_ids
+        .iter()
+        .filter_map(|id| {
+            graph
+                .change_metrics
+                .get(id.as_str())
+                .map(|m| m.hotspot_score)
+        })
+        .collect();
+    let mut defect_densities: Vec<f64> = node_ids
+        .iter()
+        .filter_map(|id| {
+            graph
+                .defect_metrics
+                .get(id.as_str())
+                .map(|m| m.defect_density)
+        })
+        .collect();
+    let mut sum_couplings: Vec<f64> = node_ids
+        .iter()
+        .filter_map(|id| {
+            graph
+                .change_metrics
+                .get(id.as_str())
+                .map(|m| m.sum_coupling)
+        })
+        .collect();
+
+    let hotspot_p_high = percentile(&mut hotspots, config.percentiles.ticking_bomb_hotspot);
+    let defect_p_high = percentile(
+        &mut defect_densities,
+        config.percentiles.ticking_bomb_defect,
+    );
+    let coupling_p_high = percentile(&mut sum_couplings, config.percentiles.ticking_bomb_coupling);
+
+    let mut signals = Vec::new();
+    for node_id in node_ids {
+        let change = graph.change_metrics.get(node_id.as_str());
+        let defect = graph.defect_metrics.get(node_id.as_str());
+        let hotspot = change.map(|m| m.hotspot_score).unwrap_or(0.0);
+        let defect_d = defect.map(|m| m.defect_density).unwrap_or(0.0);
+        let sum_coupling = change.map(|m| m.sum_coupling).unwrap_or(0.0);
+
         if hotspot > hotspot_p_high
             && hotspot_p_high > 0.0
             && defect_d > defect_p_high
@@ -395,22 +433,21 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             ));
         }
     }
+    signals
+}
 
-    // --- Dependency Cycle detection ---
-    // Use Tarjan's SCC to find circular dependency chains.
-    // Only consider structural edges to find real import cycles.
+fn detect_dependency_cycles(graph: &UnifiedGraph) -> Vec<Signal> {
     let sccs = petgraph::algo::tarjan_scc(&graph.graph);
+    let mut signals = Vec::new();
     for scc in &sccs {
         if scc.len() < 2 {
             continue;
         }
-        // Collect node IDs in this cycle
         let cycle_ids: Vec<&str> = scc
             .iter()
             .map(|&idx| graph.graph[idx].id.as_str())
             .collect();
 
-        // Only report cycles involving source files, skip generated code
         if !cycle_ids
             .iter()
             .all(|id| is_source_file(id) && !is_generated_code(id))
@@ -418,7 +455,6 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             continue;
         }
 
-        // Check that the SCC is actually connected via structural edges
         let has_structural = scc.iter().any(|&idx| {
             graph.graph.edges(idx).any(|e| {
                 e.weight().edge_type.layer() == EdgeLayer::Structural && scc.contains(&e.target())
@@ -428,7 +464,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             continue;
         }
 
-        let severity = cycle_ids.len() as f64 * 0.5; // longer cycles are worse
+        let severity = cycle_ids.len() as f64 * 0.5;
         let cycle_desc = if cycle_ids.len() <= 5 {
             cycle_ids.join(" → ")
         } else {
@@ -439,7 +475,6 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
                 cycle_ids.len()
             )
         };
-
         signals.push(Signal::new(
             SignalType::DependencyCycle,
             cycle_ids[0],
@@ -451,10 +486,16 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             ),
         ));
     }
+    signals
+}
 
-    // --- God Module detection ---
-    // Files with extreme complexity, LOC, and fan-out — doing too much.
-    for node_id in &node_ids {
+fn detect_god_modules(
+    node_ids: &[String],
+    graph: &UnifiedGraph,
+    thresholds: &ThresholdConfig,
+) -> Vec<Signal> {
+    let mut signals = Vec::new();
+    for node_id in node_ids {
         let node = match graph.get_node(node_id) {
             Some(n) => n,
             None => continue,
@@ -463,39 +504,46 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         let complexity = node.complexity.unwrap_or(0);
         let loc = node.loc.unwrap_or(0);
         let metrics = compute_node_metrics(graph, node_id);
-        let fan_out = metrics.fan_out;
+        // Use CBO (Coupling Between Objects) — distinct external modules depended on.
+        // fan_out counts all outgoing structural edges including Contains edges to own
+        // inner functions, which inflates the score and causes false positives.
+        let cbo = metrics.cbo;
 
         if complexity >= thresholds.god_module_complexity
             && loc >= thresholds.god_module_loc
-            && fan_out >= thresholds.god_module_fan_out
+            && cbo >= thresholds.god_module_fan_out
             && !is_test_file(node_id)
             && !is_generated_code(node_id)
         {
             let severity =
-                (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (fan_out as f64 / 15.0);
+                (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (cbo as f64 / 15.0);
             signals.push(Signal::new(
                 SignalType::GodModule,
                 node_id,
                 None,
                 severity,
                 format!(
-                    "God module: complexity {}, {} LOC, {} outgoing dependencies. Split into focused modules.",
-                    complexity, loc, fan_out
+                    "God module: complexity {}, {} LOC, {} external dependencies (cbo). Split into focused modules.",
+                    complexity, loc, cbo
                 ),
             ));
         }
     }
+    signals
+}
 
-    // --- Shotgun Surgery detection ---
-    // Files whose changes scatter across many other files.
-    // Detected via co-change breadth: count distinct files that co-change with this file.
+fn detect_shotgun_surgery(
+    co_change_edges: &[(&str, &str, f64)],
+    thresholds: &ThresholdConfig,
+) -> Vec<Signal> {
     let mut co_change_breadth: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
-    for (a, b, _coupling) in &co_change_edges {
+    for (a, b, _) in co_change_edges {
         *co_change_breadth.entry(a).or_default() += 1;
         *co_change_breadth.entry(b).or_default() += 1;
     }
 
+    let mut signals = Vec::new();
     for (node_id, breadth) in &co_change_breadth {
         if *breadth >= thresholds.shotgun_surgery_breadth
             && is_source_file(node_id)
@@ -514,16 +562,19 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             ));
         }
     }
+    signals
+}
 
-    // --- Unstable Dependency detection ---
-    // Stable module (low instability) depending on unstable module (high instability).
-    // Violates the Stable Dependencies Principle: dependencies should flow toward stability.
-    for (a, b, _) in &import_edges {
+fn detect_unstable_dependencies(
+    import_edges: &[(&str, &str, f64)],
+    graph: &UnifiedGraph,
+    thresholds: &ThresholdConfig,
+) -> Vec<Signal> {
+    let mut signals = Vec::new();
+    for (a, b, _) in import_edges {
         let metrics_a = compute_node_metrics(graph, a);
         let metrics_b = compute_node_metrics(graph, b);
 
-        // A is stable (low instability), B is unstable (high instability)
-        // and the gap is significant
         let gap = metrics_b.instability - metrics_a.instability;
         if gap >= thresholds.unstable_dep_gap
             && metrics_a.instability < 0.3
@@ -546,14 +597,6 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
             ));
         }
     }
-
-    // Sort by severity (highest first)
-    signals.sort_by(|a, b| {
-        b.severity
-            .partial_cmp(&a.severity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
     signals
 }
 
@@ -648,7 +691,9 @@ fn is_generated_code(path: &str) -> bool {
         // OpenAPI / Swagger generated
         || path.contains("/generated/")
         || path.contains("/gen/")
-        && (filename.ends_with(".go") || filename.ends_with(".ts") || filename.ends_with(".py"))
+            && (filename.ends_with(".go")
+                || filename.ends_with(".ts")
+                || filename.ends_with(".py"))
 }
 
 fn is_reexport_module(path: &str) -> bool {
@@ -1046,7 +1091,7 @@ mod tests {
         god.loc = Some(1200);
         g.add_node(god);
 
-        // Add many import targets to give it high fan-out
+        // Add many import targets to give it high CBO (distinct external modules)
         for i in 0..20 {
             let dep_id = format!("dep{}.py", i);
             g.add_node(Node::module(dep_id.clone(), dep_id.clone()));
@@ -1059,7 +1104,7 @@ mod tests {
             signals
                 .iter()
                 .any(|s| s.signal_type == SignalType::GodModule),
-            "Should detect god module with high complexity, LOC, and fan-out"
+            "Should detect god module with high complexity, LOC, and external dependencies"
         );
     }
 
@@ -1077,6 +1122,66 @@ mod tests {
                 .iter()
                 .any(|s| s.signal_type == SignalType::GodModule),
             "Simple files should not trigger god module"
+        );
+    }
+
+    #[test]
+    fn test_no_god_module_for_many_inner_functions_low_cbo() {
+        // A file with many inner functions (high fan_out via Contains edges)
+        // but only one external dependency (low cbo) should NOT be flagged.
+        // This tests the fix: GodModule uses cbo, not fan_out.
+        let mut g = UnifiedGraph::new();
+        let mut big = Node::module("big.rs", "big.rs");
+        big.complexity = Some(120);
+        big.loc = Some(800);
+        g.add_node(big);
+
+        // Add 20 inner function nodes in the SAME file (Contains edges)
+        for i in 0..20 {
+            let fn_id = format!("big.rs::fn_{}", i);
+            let fn_node = Node::module(fn_id.clone(), "big.rs"); // same file_path
+            g.add_node(fn_node);
+            g.add_edge("big.rs", &fn_id, EdgeType::Contains, 1.0)
+                .unwrap();
+        }
+
+        // One external import
+        g.add_node(Node::module("util.rs", "util.rs"));
+        g.add_edge("big.rs", "util.rs", EdgeType::Imports, 1.0)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GodModule),
+            "File with many inner functions but only 1 external dep (cbo=1) should not be GodModule"
+        );
+    }
+
+    #[test]
+    fn test_god_module_fires_for_high_cbo() {
+        // A file that imports 15+ distinct external modules should trigger GodModule.
+        let mut g = UnifiedGraph::new();
+        let mut hub = Node::module("hub.rs", "hub.rs");
+        hub.complexity = Some(80);
+        hub.loc = Some(600);
+        g.add_node(hub);
+
+        // 15 imports to distinct external files
+        for i in 0..15 {
+            let ext_id = format!("ext{}.rs", i);
+            g.add_node(Node::module(ext_id.clone(), ext_id.clone()));
+            g.add_edge("hub.rs", &ext_id, EdgeType::Imports, 1.0)
+                .unwrap();
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GodModule),
+            "File importing 15 distinct external modules (cbo=15) should trigger GodModule"
         );
     }
 

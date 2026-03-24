@@ -393,8 +393,8 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
             });
             serde_json::to_string_pretty(&export)?
         }
-        ExportFormat::Dot => generate_dot(&db)?,
-        ExportFormat::Mermaid => generate_mermaid(&db)?,
+        ExportFormat::Dot => db.get_dot_export()?,
+        ExportFormat::Mermaid => db.get_mermaid_export()?,
         ExportFormat::VizJson => {
             let viz = db.get_viz_export()?;
             serde_json::to_string_pretty(&viz)?
@@ -409,87 +409,6 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
     }
 
     Ok(0)
-}
-
-fn generate_dot(db: &Database) -> Result<String> {
-    let mut out = String::from("digraph ising {\n  rankdir=LR;\n  node [shape=box];\n\n");
-
-    // Query edges from db
-    let signals = db.get_signals(None, None)?;
-    let hotspots = db.get_hotspots(50)?;
-
-    // Add hotspot nodes with color
-    for (id, score, _, _) in &hotspots {
-        let color = if *score > 0.7 {
-            "red"
-        } else if *score > 0.4 {
-            "orange"
-        } else {
-            "lightblue"
-        };
-        let label = id.replace('"', "\\\"");
-        out.push_str(&format!(
-            "  \"{}\" [label=\"{}\\n{:.2}\", style=filled, fillcolor={}];\n",
-            id, label, score, color
-        ));
-    }
-
-    // Add signal edges
-    for signal in &signals {
-        if let Some(node_b) = &signal.node_b {
-            let style = match signal.signal_type.as_str() {
-                "ghost_coupling" => "style=dashed, color=purple",
-                "fragile_boundary" => "style=bold, color=red",
-                "over_engineering" => "style=dotted, color=gray",
-                _ => "color=black",
-            };
-            out.push_str(&format!(
-                "  \"{}\" -> \"{}\" [{}, label=\"{}\"];\n",
-                signal.node_a, node_b, style, signal.signal_type
-            ));
-        }
-    }
-
-    out.push_str("}\n");
-    Ok(out)
-}
-
-fn generate_mermaid(db: &Database) -> Result<String> {
-    let mut out = String::from("graph LR\n");
-
-    let signals = db.get_signals(None, None)?;
-    let hotspots = db.get_hotspots(50)?;
-
-    // Add hotspot nodes
-    for (id, score, _, _) in &hotspots {
-        let safe_id = id.replace(['/', '.', ':'], "_");
-        let label = id.replace('"', "");
-        if *score > 0.7 {
-            out.push_str(&format!("  {safe_id}[\"{label}\\n🔥 {score:.2}\"]:::hot\n"));
-        } else {
-            out.push_str(&format!("  {safe_id}[\"{label}\\n{score:.2}\"]\n"));
-        }
-    }
-
-    // Add signal edges
-    for signal in &signals {
-        if let Some(node_b) = &signal.node_b {
-            let safe_a = signal.node_a.replace(['/', '.', ':'], "_");
-            let safe_b = node_b.replace(['/', '.', ':'], "_");
-            let arrow = match signal.signal_type.as_str() {
-                "ghost_coupling" => "-.->",
-                "fragile_boundary" => "==>",
-                _ => "-->",
-            };
-            out.push_str(&format!(
-                "  {safe_a} {arrow}|{}| {safe_b}\n",
-                signal.signal_type
-            ));
-        }
-    }
-
-    out.push_str("  classDef hot fill:#f96,stroke:#333\n");
-    Ok(out)
 }
 
 fn cmd_serve(args: ServeArgs) -> Result<i32> {

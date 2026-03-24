@@ -60,6 +60,7 @@ pub fn build_change_graph(
 
     // Collect changed files per commit by walking the commit graph
     let mut file_changes: HashMap<String, u32> = HashMap::new();
+    let mut file_churn: HashMap<String, u32> = HashMap::new();
     let mut co_changes: HashMap<(String, String), u32> = HashMap::new();
     let mut total_commits: u32 = 0;
     let mut skipped_large: u32 = 0;
@@ -112,27 +113,29 @@ pub fn build_change_graph(
             skipped_old = 0;
         }
 
-        // Get changed files by diffing against parent (only source code files, respecting .isingignore)
-        let changed_files: std::collections::HashSet<String> = get_changed_files(&repo, &commit)?
+        // Get changed files with per-file churn lines by diffing against parent.
+        let changed_map: HashMap<String, u32> = get_changed_files(&repo, &commit)?
             .into_iter()
-            .filter(|f| Language::is_supported_file(f) && !ignore.is_ignored(f))
+            .filter(|(f, _)| Language::is_supported_file(f) && !ignore.is_ignored(f))
             .collect();
 
-        if !changed_files.is_empty() {
+        if !changed_map.is_empty() {
             // Skip bulk commits that touch too many files (noisy: mass renames, formatting, etc.)
-            if max_files_per_commit > 0 && changed_files.len() > max_files_per_commit {
+            if max_files_per_commit > 0 && changed_map.len() > max_files_per_commit {
                 skipped_large += 1;
                 // Still count individual file changes for frequency, but skip co-change pairs
-                for f in &changed_files {
+                for (f, churn) in &changed_map {
                     *file_changes.entry(f.clone()).or_default() += 1;
+                    *file_churn.entry(f.clone()).or_default() += churn;
                 }
             } else {
-                for f in &changed_files {
+                for (f, churn) in &changed_map {
                     *file_changes.entry(f.clone()).or_default() += 1;
+                    *file_churn.entry(f.clone()).or_default() += churn;
                 }
 
                 // All unique pairs (only for reasonably-sized commits)
-                let files_vec: Vec<&String> = changed_files.iter().collect();
+                let files_vec: Vec<&String> = changed_map.keys().collect();
                 for i in 0..files_vec.len() {
                     for j in (i + 1)..files_vec.len() {
                         let key = ordered_pair(files_vec[i], files_vec[j]);
@@ -225,12 +228,18 @@ pub fn build_change_graph(
             })
             .unwrap_or(0.0);
 
+        let total_churn = file_churn.get(file).copied().unwrap_or(0);
+        let churn_rate = if *freq > 0 {
+            total_churn as f64 / *freq as f64
+        } else {
+            0.0
+        };
         graph.change_metrics.insert(
             file.clone(),
             ChangeMetrics {
                 change_freq: *freq,
-                churn_lines: 0, // Would require per-file diff analysis
-                churn_rate: 0.0,
+                churn_lines: total_churn,
+                churn_rate,
                 hotspot_score: hotspot,
                 sum_coupling,
                 last_changed: None,
@@ -241,44 +250,45 @@ pub fn build_change_graph(
     Ok(graph)
 }
 
-/// Get the list of changed files in a commit (compared to its first parent).
+/// Get the list of changed files in a commit with per-file line churn counts.
+/// Returns a map from file path to (lines_added + lines_removed) for that commit.
 fn get_changed_files(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
-) -> Result<std::collections::HashSet<String>, anyhow::Error> {
-    let mut changed = std::collections::HashSet::new();
+) -> Result<HashMap<String, u32>, anyhow::Error> {
+    let mut changed: HashMap<String, u32> = HashMap::new();
+    let mut resource_cache = repo.diff_resource_cache_for_tree_diff().ok();
 
     let tree = commit.tree()?;
 
-    // If there's a parent, diff against it; otherwise this is the root commit
+    // If there's a parent, diff against it; otherwise this is the root commit.
     let parent_tree = commit
         .parent_ids()
         .next()
         .and_then(|pid| repo.find_commit(pid.detach()).ok())
         .and_then(|pc| pc.tree().ok());
 
-    match parent_tree {
-        Some(ptree) => {
-            ptree.changes()?.for_each_to_obtain_tree(&tree, |change| {
-                if let Ok(path) = change.location().to_str() {
-                    changed.insert(path.to_string());
-                }
-                Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
-            })?;
-        }
-        None => {
-            // Root commit: diff empty tree → commit tree
-            let empty_tree = repo.empty_tree();
-            empty_tree
-                .changes()?
-                .for_each_to_obtain_tree(&tree, |change| {
-                    if let Ok(path) = change.location().to_str() {
-                        changed.insert(path.to_string());
-                    }
-                    Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
-                })?;
-        }
-    }
+    let from_tree = match parent_tree {
+        Some(pt) => pt,
+        None => repo.empty_tree(),
+    };
+
+    from_tree
+        .changes()?
+        .for_each_to_obtain_tree(&tree, |change| {
+            if let Ok(path) = change.location().to_str() {
+                let churn = resource_cache
+                    .as_mut()
+                    .and_then(|cache| {
+                        let counts = change.diff(cache).ok()?.line_counts().ok()??;
+                        cache.clear_resource_cache_keep_allocation();
+                        Some(counts.insertions + counts.removals)
+                    })
+                    .unwrap_or(0);
+                changed.insert(path.to_string(), churn);
+            }
+            Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
+        })?;
 
     Ok(changed)
 }
