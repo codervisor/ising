@@ -53,6 +53,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           packages: ising-cli
+          binary-name: ising
           platform: ${{ matrix.platform }}
 
   publish-platform:
