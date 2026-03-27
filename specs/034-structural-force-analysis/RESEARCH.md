@@ -521,6 +521,127 @@ Estimates a network formation model analyzing motives, costs, benefits, and exte
 
 ---
 
+## 9. Validation Methodology: How to Prove the Theory
+
+### 9.1 The Ground Truth Problem: Defining "Defect"
+
+Before validating whether safety factors predict defects, we need a reliable way to label what counts as a defect. No single method is perfect — each has known biases. The recommended approach is a **multi-signal composite** that reduces dependence on any single labeling method.
+
+#### Method A: Issue Tracker Linking (highest reliability)
+
+Match commits to bug reports via explicit references (`fixes #123`, `closes #456`, Jira links with type = "bug"). The commit that fixes a bug implicates the code it touches.
+
+- **Strengths:** Human-labeled ground truth. Someone decided "this is a bug."
+- **Weaknesses:** Not all bugs get tracked. Not all fix commits reference issues. Label quality varies by project.
+- **Best projects:** Apache (Jira-disciplined), Chromium, Mozilla — mature projects with enforced issue-linking policies.
+
+#### Method B: SZZ Algorithm (Ising already implements this)
+
+Ising's Layer 3 (Defect Graph) traces: `bug report → fix commit → git blame → bug-introducing commit → implicated files/functions`. This identifies not just where the fix happened, but where the bug was **introduced**.
+
+- **Strengths:** Traces defects to root cause, not just symptom location.
+- **Weaknesses:** Classic SZZ has known noise — refactoring commits get falsely blamed, cosmetic changes confuse blame, large mixed commits dilute signal.
+- **Improved variants:**
+  - **RA-SZZ** (2018) — filters out refactoring commits using RefactoringMiner
+  - **FI-SZZ** (2024) — augments with file references from bug discussions
+  - **LLM4SZZ** (2025) — uses LLMs for context-aware assessment, +6.9–16% F1 improvement
+
+#### Method C: Commit Message Heuristics (broadest coverage)
+
+Classify commits by message patterns: `fix/bug/patch/repair/resolve` → bug fix (implicated code is defective); `feat/add/implement` → feature; `refactor/rename/cleanup` → maintenance (filter out); `revert` → prior commit was defective.
+
+- **Strengths:** Works on any repo, no issue tracker needed.
+- **Weaknesses:** Noisy. "Fix typo in README" is not a defect. Needs filtering by file type and change size.
+
+#### Method D: Post-Release Defect Density (gold standard)
+
+For projects with releases: take a snapshot at release T, count bugs reported against release T that trace to each module, normalize as defects_per_KLOC. This is what Tornhill & Borg used in "Code Red" (2022) — correlating health scores against Jira defect counts per file.
+
+- **Strengths:** Closest to "real" defect rate. Time-bounded. Actionable.
+- **Weaknesses:** Requires projects with clear release cycles and good issue tracking.
+
+#### Method E: Test Failure Signals
+
+Commits that cause test failures in other modules = evidence of propagation. Modules that frequently appear in test failure stack traces = high-stress nodes. Flaky tests concentrated in certain modules = fatigue signal.
+
+- **Strengths:** Automated, objective, no human labeling needed.
+- **Weaknesses:** Only captures defects that tests catch. Test quality varies.
+
+#### Recommended: Multi-Signal Composite
+
+```
+defect_score(module, time_window) =
+    w1 × bug_fix_commits_touching_module +      # commit heuristic
+    w2 × szz_traced_introductions +              # SZZ root cause
+    w3 × issue_tracker_bugs_linked +             # human-labeled
+    w4 × reverts_of_changes_to_module            # revert = admission of defect
+```
+
+For initial validation, perfect ground truth is not required. The question is **relative ordering**: do modules ranked Critical (SF < 1.0) consistently have **more** defects than modules ranked Healthy (SF 2.0–3.0)? Even noisy labels work for this — noise reduces statistical power but doesn't create systematic bias. Run on enough projects (10+) and the signal emerges through the noise.
+
+### 9.2 Validation Strategy
+
+#### Phase 1: Calibration (prove individual metrics)
+
+Pick 5+ large OSS repos with good issue trackers (e.g., Kubernetes, Django, VS Code, Linux kernel, Spring Framework). Compute all material properties at multiple historical snapshots. Correlate each property individually with defect outcomes. This validates the ingredients before testing the recipe.
+
+**Key question:** Does each material property (stiffness, yield_strength, fatigue_life, cross_section) individually correlate with defect_score? If any property shows zero correlation, reconsider its formula.
+
+#### Phase 2: Integration (prove the combination adds value)
+
+Compute Von Mises stress and safety factors. Compare predictive power:
+- SF vs. each individual material property
+- SF vs. existing metrics (raw complexity, raw churn, raw coupling)
+- SF vs. existing tools (CodeScene health score, SonarQube ratings)
+
+**The bar:** SF must outperform the best individual metric, or the unification adds nothing but complexity. Use ROC curves and AUC (Area Under Curve) for comparison.
+
+#### Phase 3: Simulation (prove load cases work)
+
+For each historical commit that caused a regression/bug:
+1. Reconstruct the pre-commit state
+2. Run `simulate_load_case` with the changed files as load
+3. Check if the high-stress nodes in the simulation match the files that actually needed fixing
+
+**Metric:** Hit rate — what percentage of actual impact did the simulation predict? Baseline comparison: does load case simulation outperform "list all transitive dependencies"?
+
+#### Phase 4: Threshold validation (prove the zones are calibrated)
+
+Across all projects, collect (SF_at_time_T, defect_count_at_T+1) pairs. Plot defect rate vs SF. Look for natural breakpoints — do they align with the proposed zones (1.0, 1.5, 2.0, 3.0)? If breakpoints exist at different values, recalibrate the zones.
+
+**Statistical tests:**
+- ANOVA across SF zones for defect rate differences (p < 0.05)
+- Spearman rank correlation between SF and defect_score (expect ρ < -0.3)
+- Precision/recall of SF < 1.0 as a classifier for "will have defects in next release"
+
+### 9.3 Falsifiable Predictions
+
+| Claim | Prediction | Falsification criterion |
+|---|---|---|
+| Material properties | Combined model explains more variance than any single metric | R² of combined model ≤ R² of best individual metric |
+| Von Mises stress | σ_vm ranking outperforms single stress components | AUC(σ_vm) ≤ max(AUC(σ_tensile), AUC(σ_compressive)) |
+| Safety factor zones | SF < 1.0 modules have higher defect rates than SF > 2.0 | No significant difference in defect rates across zones (χ² test, p > 0.05) |
+| Fatigue life | Low fatigue_life modules fail sooner | Kaplan-Meier survival curves by fatigue quartile do not separate |
+| Load case simulation | Simulated stress delta predicts actual change scope | Hit rate ≤ naive transitive dependency listing |
+| λ ≥ 1.0 threshold | Projects with λ ≥ 1.0 have higher defect density | No defect density difference at the threshold across projects |
+
+### 9.4 What "Proof" Looks Like
+
+**Theory is validated if:**
+1. Safety factor predicts defects better than any single metric (R² improvement ≥ 10%)
+2. SF zone thresholds separate defect rates with statistical significance (p < 0.05)
+3. Load case simulation predicts ≥ 60% of actual change impact radius
+4. Weibull fatigue model fits real code lifetime data (Kolmogorov-Smirnov goodness-of-fit)
+5. Self-analysis on Ising repo: known hotspots show lowest safety factors
+
+**Theory is disproven if:**
+- Von Mises adds no predictive power over raw hotspot scoring
+- SF zones don't separate defect rates (thresholds are arbitrary)
+- Load case simulation is no better than listing transitive dependencies
+- Material property formulas don't correlate with any defect signal
+
+---
+
 ## Summary Scorecard
 
 | SPEC 34 Claim | Scientific Backing | Novelty Level |
