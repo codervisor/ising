@@ -1,51 +1,23 @@
-//! Finite Element Analysis (FEA) types for code stress analysis.
+//! Risk analysis types for codebase structural assessment.
 //!
-//! Defines material properties, stress tensors, safety factors, load cases,
-//! and stress fields — the data model for treating codebases as physical
-//! structures under load.
+//! Defines risk scores, capacity, safety factors, load cases, and risk fields.
+//! Replaces the earlier FEA-themed types with honest, direct metrics.
 
 use serde::{Deserialize, Serialize};
-
-/// Material properties for a code module (analogous to physical material constants).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MaterialProperties {
-    /// Resistance to change: normalize(complexity) × normalize(CBO).
-    pub stiffness: f64,
-    /// Capacity before breaking: baseline × (1 + test_coverage_ratio).
-    /// Defaults to 0.5 when no coverage data is available.
-    pub yield_strength: f64,
-    /// Remaining endurance: max_churn_rate / actual_churn_rate.
-    pub fatigue_life: f64,
-    /// API surface area: fan_in + fan_out.
-    pub cross_section: f64,
-}
-
-/// Stress tensor for a code module.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StressTensor {
-    /// Applied load: change_freq × churn_rate.
-    pub change_pressure: f64,
-    /// Fan-out strain: module pulled in many directions by consumers.
-    pub tensile: f64,
-    /// Responsibility overload: high LOC × complexity × CBO under change.
-    pub compressive: f64,
-    /// Combined scalar: sqrt(tensile² + compressive² - tensile × compressive).
-    pub von_mises: f64,
-}
 
 /// Safety classification zones based on safety factor value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafetyZone {
-    /// SF < 1.0 — already past yield, failing under current load.
+    /// SF < 1.0 — risk exceeds capacity.
     Critical,
     /// SF 1.0–1.5 — little margin, next change may break it.
     Danger,
     /// SF 1.5–2.0 — caution needed.
     Warning,
-    /// SF 2.0–3.0 — good architectural margin.
+    /// SF 2.0–3.0 — good margin.
     Healthy,
-    /// SF > 3.0 — more stable than necessary.
+    /// SF > 3.0 — low risk, stable module.
     OverEngineered,
 }
 
@@ -72,7 +44,7 @@ impl SafetyZone {
             SafetyZone::Danger => "DANGER",
             SafetyZone::Warning => "WARNING",
             SafetyZone::Healthy => "HEALTHY",
-            SafetyZone::OverEngineered => "OVER-ENG",
+            SafetyZone::OverEngineered => "STABLE",
         }
     }
 }
@@ -83,24 +55,34 @@ impl std::fmt::Display for SafetyZone {
     }
 }
 
-/// Complete FEA result for a single node.
+/// Risk assessment for a single code module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeStress {
+pub struct NodeRisk {
     pub node_id: String,
     pub file_path: String,
-    pub material: MaterialProperties,
-    pub stress: StressTensor,
+    /// How much change pressure this module faces [0, 1+].
+    pub change_load: f64,
+    /// Structural weight: combined LOC, complexity, coupling score [0, 1].
+    pub structural_weight: f64,
+    /// Risk received from neighbors through propagation.
+    pub propagated_risk: f64,
+    /// Total risk: change_load + propagated_risk.
+    pub risk_score: f64,
+    /// Module's resilience to change [0.05, 1.0].
+    pub capacity: f64,
+    /// capacity / risk_score. High = safe, low = danger.
     pub safety_factor: f64,
-    pub safety_zone: SafetyZone,
+    /// Classification zone.
+    pub zone: SafetyZone,
 }
 
-/// A complete stress field across the graph.
+/// A complete risk field across the graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StressField {
-    pub nodes: Vec<NodeStress>,
-    /// Number of Jacobi iterations to convergence.
+pub struct RiskField {
+    pub nodes: Vec<NodeRisk>,
+    /// Number of propagation iterations to convergence.
     pub iterations: usize,
-    /// Whether the propagation converged within max_iterations.
+    /// Whether propagation converged within max_iterations.
     pub converged: bool,
 }
 
@@ -118,23 +100,23 @@ pub struct LoadCase {
     pub loads: Vec<LoadPoint>,
 }
 
-/// Difference in stress for a single node between two stress fields.
+/// Difference in risk for a single node between two risk fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeStressDelta {
+pub struct NodeRiskDelta {
     pub node_id: String,
     pub file_path: String,
-    pub von_mises_before: f64,
-    pub von_mises_after: f64,
+    pub risk_before: f64,
+    pub risk_after: f64,
     pub safety_factor_before: f64,
     pub safety_factor_after: f64,
     pub zone_before: SafetyZone,
     pub zone_after: SafetyZone,
 }
 
-/// Comparison between two stress fields.
+/// Comparison between two risk fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StressDelta {
-    pub deltas: Vec<NodeStressDelta>,
+pub struct RiskDelta {
+    pub deltas: Vec<NodeRiskDelta>,
 }
 
 #[cfg(test)]
@@ -178,31 +160,25 @@ mod tests {
     fn test_safety_zone_display() {
         assert_eq!(format!("{}", SafetyZone::Critical), "CRITICAL");
         assert_eq!(format!("{}", SafetyZone::Healthy), "HEALTHY");
+        assert_eq!(format!("{}", SafetyZone::OverEngineered), "STABLE");
     }
 
     #[test]
     fn test_serde_roundtrip() {
-        let ns = NodeStress {
+        let nr = NodeRisk {
             node_id: "test.py".to_string(),
             file_path: "test.py".to_string(),
-            material: MaterialProperties {
-                stiffness: 0.5,
-                yield_strength: 0.5,
-                fatigue_life: 2.0,
-                cross_section: 5.0,
-            },
-            stress: StressTensor {
-                change_pressure: 10.0,
-                tensile: 3.0,
-                compressive: 4.0,
-                von_mises: 3.6,
-            },
-            safety_factor: 0.14,
-            safety_zone: SafetyZone::Critical,
+            change_load: 0.8,
+            structural_weight: 0.5,
+            propagated_risk: 0.1,
+            risk_score: 0.9,
+            capacity: 0.3,
+            safety_factor: 0.33,
+            zone: SafetyZone::Critical,
         };
-        let json = serde_json::to_string(&ns).unwrap();
-        let restored: NodeStress = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&nr).unwrap();
+        let restored: NodeRisk = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.node_id, "test.py");
-        assert_eq!(restored.safety_zone, SafetyZone::Critical);
+        assert_eq!(restored.zone, SafetyZone::Critical);
     }
 }
