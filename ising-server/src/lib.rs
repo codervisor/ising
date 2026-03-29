@@ -88,11 +88,11 @@ async fn list_tools() -> Json<ToolList> {
             },
             ToolDefinition {
                 name: "ising_safety".to_string(),
-                description: "Get safety factor rankings for modules — shows which code is closest to failure under current change pressure".to_string(),
+                description: "Get safety factor rankings for modules — shows which code has the most risk relative to its capacity".to_string(),
             },
             ToolDefinition {
                 name: "ising_simulate".to_string(),
-                description: "Simulate a file change and see the stress impact on the codebase — predicts which modules will be most affected".to_string(),
+                description: "Simulate a file change and see the risk impact — predicts which modules will be most affected".to_string(),
             },
         ],
     })
@@ -179,9 +179,9 @@ async fn simulate_handler(
 
     let config = ising_core::config::Config::default();
     let load_case = ising_analysis::stress::single_file_change(&graph, &query.target);
-    let baseline = ising_analysis::stress::compute_stress_field(&graph, &config);
+    let baseline = ising_analysis::stress::compute_risk_field(&graph, &config);
     let loaded = ising_analysis::stress::simulate_load_case(&graph, &config, &load_case);
-    let delta = ising_analysis::stress::compare_stress_fields(&baseline, &loaded);
+    let delta = ising_analysis::stress::compare_risk_fields(&baseline, &loaded);
 
     let json =
         serde_json::to_value(&delta).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;

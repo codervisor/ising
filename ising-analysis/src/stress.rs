@@ -1,13 +1,11 @@
-//! FEA stress computation for code modules.
+//! Risk computation for code modules.
 //!
-//! Computes material properties, stress tensors, safety factors, and runs
-//! Jacobi-style stress propagation across the coupling graph. Also provides
-//! load case simulation and comparison.
+//! Computes change load, capacity, propagated risk, and safety factors.
+//! Uses influence propagation along both co-change and structural edges.
 
 use ising_core::config::Config;
 use ising_core::fea::{
-    LoadCase, LoadPoint, MaterialProperties, NodeStress, NodeStressDelta, SafetyZone, StressDelta,
-    StressField, StressTensor,
+    LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta, RiskField, SafetyZone,
 };
 use ising_core::graph::{EdgeType, NodeType, UnifiedGraph};
 use ising_core::metrics::{compute_node_metrics, normalize};
@@ -19,12 +17,14 @@ const MAX_SAFETY_FACTOR: f64 = 10.0;
 /// Small epsilon to avoid division by zero.
 const DIV_EPSILON: f64 = 1e-10;
 
+/// Minimum capacity floor.
+const MIN_CAPACITY: f64 = 0.05;
+
 /// Collected max values across the graph for normalization.
 struct GraphMaxes {
     complexity: f64,
     cbo: f64,
     loc: f64,
-    churn_rate: f64,
     change_pressure: f64,
     coupling: f64,
 }
@@ -34,8 +34,6 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
     let mut max_complexity: f64 = 0.0;
     let mut max_cbo: f64 = 0.0;
     let mut max_loc: f64 = 0.0;
-    let mut max_churn_rate: f64 = 0.0;
-
     let mut max_change_pressure: f64 = 0.0;
     let mut max_coupling: f64 = 0.0;
 
@@ -53,7 +51,6 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
         max_coupling = max_coupling.max((metrics.fan_in + metrics.fan_out) as f64);
 
         if let Some(cm) = graph.change_metrics.get(node_id) {
-            max_churn_rate = max_churn_rate.max(cm.churn_rate);
             max_change_pressure = max_change_pressure.max(cm.change_freq as f64 * cm.churn_rate);
         }
     }
@@ -62,117 +59,129 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
         complexity: max_complexity,
         cbo: max_cbo,
         loc: max_loc,
-        churn_rate: max_churn_rate,
         change_pressure: max_change_pressure,
         coupling: max_coupling,
     }
 }
 
-/// Compute material properties for a single node.
-fn compute_material(
-    graph: &UnifiedGraph,
-    node_id: &str,
-    maxes: &GraphMaxes,
-    config: &Config,
-) -> MaterialProperties {
-    let node = match graph.get_node(node_id) {
-        Some(n) => n,
-        None => return MaterialProperties::default(),
-    };
-
-    let metrics = compute_node_metrics(graph, node_id);
-
-    let stiffness = normalize(node.complexity.unwrap_or(0) as f64, maxes.complexity)
-        * normalize(metrics.cbo as f64, maxes.cbo);
-
-    let yield_strength = config.fea.default_yield_strength;
-
-    let churn_rate = graph
-        .change_metrics
-        .get(node_id)
-        .map(|cm| cm.churn_rate)
-        .unwrap_or(0.0);
-    let fatigue_life = if churn_rate > 0.0 {
-        (maxes.churn_rate / churn_rate).min(MAX_SAFETY_FACTOR)
-    } else {
-        MAX_SAFETY_FACTOR
-    };
-
-    let cross_section = (metrics.fan_in + metrics.fan_out) as f64;
-
-    MaterialProperties {
-        stiffness,
-        yield_strength,
-        fatigue_life,
-        cross_section,
-    }
-}
-
-/// Compute the local (pre-propagation) stress tensor for a single node.
-fn compute_local_stress(
+/// Compute change load for a node: how much change pressure it faces [0, 1+].
+fn compute_change_load(
     graph: &UnifiedGraph,
     node_id: &str,
     maxes: &GraphMaxes,
     pressure_multiplier: f64,
-) -> StressTensor {
-    let node = match graph.get_node(node_id) {
-        Some(n) => n,
-        None => return StressTensor::default(),
+) -> f64 {
+    let cm = match graph.change_metrics.get(node_id) {
+        Some(cm) => cm,
+        None => return 0.0,
     };
-
-    let metrics = compute_node_metrics(graph, node_id);
-
-    let cm = graph.change_metrics.get(node_id);
-    let change_freq = cm.map(|c| c.change_freq as f64).unwrap_or(0.0);
-    let churn_rate = cm.map(|c| c.churn_rate).unwrap_or(0.0);
-
-    let raw_pressure = change_freq * churn_rate;
-    let change_pressure = normalize(raw_pressure, maxes.change_pressure) * pressure_multiplier;
-
-    let fan_total = (metrics.fan_in + metrics.fan_out + 1) as f64;
-    let tensile = (metrics.fan_out as f64 / fan_total) * change_pressure;
-
-    // Compressive stress is structural — it exists even without change activity.
-    // Uses averaged combination so each factor contributes independently. A large-but-simple
-    // file or a small-but-complex file both register meaningful structural stress.
-    let coupling = (metrics.fan_in + metrics.fan_out) as f64;
-    let compressive = (normalize(node.loc.unwrap_or(0) as f64, maxes.loc)
-        + normalize(node.complexity.unwrap_or(0) as f64, maxes.complexity)
-        + normalize(coupling, maxes.coupling))
-        / 3.0;
-
-    let von_mises = (tensile * tensile + compressive * compressive - tensile * compressive).sqrt();
-
-    StressTensor {
-        change_pressure,
-        tensile,
-        compressive,
-        von_mises,
-    }
+    let raw = cm.change_freq as f64 * cm.churn_rate;
+    normalize(raw, maxes.change_pressure) * pressure_multiplier
 }
 
-/// Run Jacobi-style stress propagation on the graph.
-///
-/// Returns updated von_mises values per node, iteration count, and convergence flag.
-fn propagate_stress(
-    graph: &UnifiedGraph,
-    local_von_mises: &HashMap<String, f64>,
-    config: &Config,
-) -> (HashMap<String, f64>, usize, bool) {
-    let damping = config.fea.damping;
-    let epsilon = config.fea.epsilon;
-    let max_iter = config.fea.max_iterations;
+/// Compute structural weight for a node [0, 1].
+fn compute_structural_weight(graph: &UnifiedGraph, node_id: &str, maxes: &GraphMaxes) -> f64 {
+    let node = match graph.get_node(node_id) {
+        Some(n) => n,
+        None => return 0.0,
+    };
+    let metrics = compute_node_metrics(graph, node_id);
+    let coupling = (metrics.fan_in + metrics.fan_out) as f64;
 
-    // Build adjacency: for each node, collect (neighbor_id, coupling_weight) from CoChanges edges
-    let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
+    (normalize(node.loc.unwrap_or(0) as f64, maxes.loc)
+        + normalize(node.complexity.unwrap_or(0) as f64, maxes.complexity)
+        + normalize(coupling, maxes.coupling))
+        / 3.0
+}
+
+/// Compute capacity for a node: how resilient it is [MIN_CAPACITY, 1.0].
+///
+/// High capacity = low complexity burden, low instability, low coupling.
+/// A well-factored, stable, loosely-coupled module can absorb more change.
+fn compute_capacity(graph: &UnifiedGraph, node_id: &str, maxes: &GraphMaxes) -> f64 {
+    let node = match graph.get_node(node_id) {
+        Some(n) => n,
+        None => return 1.0,
+    };
+    let metrics = compute_node_metrics(graph, node_id);
+
+    let complexity_burden = normalize(node.complexity.unwrap_or(0) as f64, maxes.complexity);
+    let instability = if metrics.fan_in + metrics.fan_out > 0 {
+        metrics.fan_out as f64 / (metrics.fan_in + metrics.fan_out) as f64
+    } else {
+        0.0
+    };
+    let coupling_burden = normalize(metrics.cbo as f64, maxes.cbo);
+
+    // Capacity is the inverse of burden: low complexity + stable + low coupling = high capacity
+    let burden = complexity_burden * 0.4 + instability * 0.3 + coupling_burden * 0.3;
+    (1.0 - burden).max(MIN_CAPACITY)
+}
+
+/// Build adjacency list from both CoChanges and structural edges.
+fn build_adjacency<'a>(
+    graph: &'a UnifiedGraph,
+    config: &Config,
+) -> HashMap<&'a str, Vec<(&'a str, f64)>> {
     let mut neighbors: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+
+    // Co-change edges (bidirectional, higher damping)
+    let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
     for &(src, tgt, weight) in &co_change_edges {
-        // CoChanges are bidirectional in effect
-        neighbors.entry(src).or_default().push((tgt, weight));
-        neighbors.entry(tgt).or_default().push((src, weight));
+        let w = weight * config.fea.cochange_damping;
+        neighbors.entry(src).or_default().push((tgt, w));
+        neighbors.entry(tgt).or_default().push((src, w));
     }
 
-    let mut current: HashMap<String, f64> = local_von_mises.clone();
+    // Structural import edges (bidirectional for risk propagation, lower damping)
+    let import_edges = graph.edges_of_type(&EdgeType::Imports);
+    for &(src, tgt, weight) in &import_edges {
+        let w = weight * config.fea.structural_damping;
+        neighbors.entry(src).or_default().push((tgt, w));
+        neighbors.entry(tgt).or_default().push((src, w));
+    }
+
+    neighbors
+}
+
+/// Run risk propagation on the graph.
+///
+/// Uses a Jacobi-style iteration where propagated risk is separate from local load.
+/// Each iteration: propagated[i] = sum(propagated[j] * normalized_weight) for neighbors j.
+/// Total risk = local_load + propagated.
+///
+/// Weights per node are normalized so they sum to at most 1.0, guaranteeing convergence.
+///
+/// Returns (total_risk_per_node, iteration_count, converged).
+fn propagate_risk(
+    graph: &UnifiedGraph,
+    local_loads: &HashMap<String, f64>,
+    config: &Config,
+) -> (HashMap<String, f64>, usize, bool) {
+    let epsilon = config.fea.epsilon;
+    let max_iter = config.fea.max_iterations;
+    let raw_neighbors = build_adjacency(graph, config);
+
+    // Normalize weights per node so incoming influence sums to at most 1.0.
+    // This guarantees the iteration contracts and converges.
+    let neighbors: HashMap<&str, Vec<(&str, f64)>> = raw_neighbors
+        .into_iter()
+        .map(|(node, nbrs)| {
+            let total_weight: f64 = nbrs.iter().map(|&(_, w)| w).sum();
+            if total_weight > 1.0 {
+                let scale = 1.0 / total_weight;
+                let normalized: Vec<(&str, f64)> =
+                    nbrs.into_iter().map(|(n, w)| (n, w * scale)).collect();
+                (node, normalized)
+            } else {
+                (node, nbrs)
+            }
+        })
+        .collect();
+
+    // Track the propagated component separately from local load.
+    // propagated[i] starts at local_load[i] and converges to local_load + neighbor influence.
+    let mut propagated: HashMap<String, f64> = local_loads.clone();
     let mut converged = false;
     let mut iterations = 0;
 
@@ -181,25 +190,23 @@ fn propagate_stress(
         let mut max_delta: f64 = 0.0;
         let mut next = HashMap::new();
 
-        for (node_id, &local_stress) in local_von_mises {
+        for (node_id, &local_load) in local_loads {
             let neighbor_contribution: f64 = neighbors
                 .get(node_id.as_str())
                 .map(|nbrs| {
                     nbrs.iter()
-                        .map(|&(nbr, weight)| {
-                            current.get(nbr).copied().unwrap_or(0.0) * weight * damping
-                        })
+                        .map(|&(nbr, weight)| propagated.get(nbr).copied().unwrap_or(0.0) * weight)
                         .sum()
                 })
                 .unwrap_or(0.0);
 
-            let new_stress = local_stress + neighbor_contribution;
-            let old_stress = current.get(node_id).copied().unwrap_or(0.0);
-            max_delta = max_delta.max((new_stress - old_stress).abs());
-            next.insert(node_id.clone(), new_stress);
+            let new_val = local_load + neighbor_contribution;
+            let old_val = propagated.get(node_id).copied().unwrap_or(0.0);
+            max_delta = max_delta.max((new_val - old_val).abs());
+            next.insert(node_id.clone(), new_val);
         }
 
-        current = next;
+        propagated = next;
 
         if max_delta < epsilon {
             converged = true;
@@ -207,20 +214,20 @@ fn propagate_stress(
         }
     }
 
-    (current, iterations, converged)
+    (propagated, iterations, converged)
 }
 
-/// Compute the full stress field for the graph.
-pub fn compute_stress_field(graph: &UnifiedGraph, config: &Config) -> StressField {
-    compute_stress_field_with_loads(graph, config, &HashMap::new())
+/// Compute the full risk field for the graph.
+pub fn compute_risk_field(graph: &UnifiedGraph, config: &Config) -> RiskField {
+    compute_risk_field_with_loads(graph, config, &HashMap::new())
 }
 
-/// Compute stress field with optional per-node pressure multipliers.
-fn compute_stress_field_with_loads(
+/// Compute risk field with optional per-node pressure multipliers.
+fn compute_risk_field_with_loads(
     graph: &UnifiedGraph,
     config: &Config,
     pressure_multipliers: &HashMap<String, f64>,
-) -> StressField {
+) -> RiskField {
     let maxes = collect_maxes(graph);
 
     // Collect module node IDs
@@ -234,70 +241,52 @@ fn compute_stress_field_with_loads(
         .map(|s| s.to_string())
         .collect();
 
-    // Compute material properties and local stress for each module
-    let mut materials: HashMap<String, MaterialProperties> = HashMap::new();
-    let mut tensors: HashMap<String, StressTensor> = HashMap::new();
-    let mut local_von_mises: HashMap<String, f64> = HashMap::new();
+    // Compute per-node values
+    let mut capacities: HashMap<String, f64> = HashMap::new();
+    let mut structural_weights: HashMap<String, f64> = HashMap::new();
+    let mut local_loads: HashMap<String, f64> = HashMap::new();
 
     for node_id in &module_ids {
-        let material = compute_material(graph, node_id, &maxes, config);
         let multiplier = pressure_multipliers.get(node_id).copied().unwrap_or(1.0);
-        let stress = compute_local_stress(graph, node_id, &maxes, multiplier);
-        local_von_mises.insert(node_id.clone(), stress.von_mises);
-        materials.insert(node_id.clone(), material);
-        tensors.insert(node_id.clone(), stress);
+        let change_load = compute_change_load(graph, node_id, &maxes, multiplier);
+        let capacity = compute_capacity(graph, node_id, &maxes);
+        let weight = compute_structural_weight(graph, node_id, &maxes);
+
+        local_loads.insert(node_id.clone(), change_load);
+        capacities.insert(node_id.clone(), capacity);
+        structural_weights.insert(node_id.clone(), weight);
     }
 
-    // Propagate stress through coupling graph
-    let (propagated, iterations, converged) = propagate_stress(graph, &local_von_mises, config);
+    // Propagate risk through coupling graph
+    let (propagated, iterations, converged) = propagate_risk(graph, &local_loads, config);
 
-    // Auto-calibrate yield_strength from the stress distribution.
-    // Raw von_mises spans orders of magnitude; a flat yield_strength puts
-    // 99% of modules in one zone. Instead, set yield_strength so the module
-    // at the 80th percentile of non-zero stress lands at SF=2.0 (HEALTHY).
-    // This ensures zones are meaningfully populated for any codebase.
-    let mut vm_values: Vec<f64> = propagated
-        .values()
-        .copied()
-        .filter(|&v| v > DIV_EPSILON)
-        .collect();
-    vm_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let calibrated_yield = if vm_values.is_empty() {
-        config.fea.default_yield_strength
-    } else {
-        // p80 = value at 80th percentile of non-zero stress
-        let p80_idx = (vm_values.len() as f64 * 0.80) as usize;
-        let p80 = vm_values[p80_idx.min(vm_values.len() - 1)];
-        // Set yield so p80 module gets SF=2.0 → yield = p80 * 2.0
-        (p80 * 2.0).max(DIV_EPSILON)
-    };
-
-    // Build final NodeStress results
-    let mut nodes: Vec<NodeStress> = Vec::with_capacity(module_ids.len());
+    // Build final NodeRisk results
+    let mut nodes: Vec<NodeRisk> = Vec::with_capacity(module_ids.len());
     for node_id in &module_ids {
-        let mut material = materials.remove(node_id).unwrap_or_default();
-        let mut stress = tensors.remove(node_id).unwrap_or_default();
+        let change_load = local_loads.get(node_id).copied().unwrap_or(0.0);
+        let capacity = capacities.get(node_id).copied().unwrap_or(1.0);
+        let structural_weight = structural_weights.get(node_id).copied().unwrap_or(0.0);
+        let total_risk = propagated.get(node_id).copied().unwrap_or(change_load);
+        let propagated_risk = total_risk - change_load;
 
-        // Update von_mises with propagated value
-        stress.von_mises = propagated.get(node_id).copied().unwrap_or(stress.von_mises);
-        material.yield_strength = calibrated_yield;
-
-        let safety_factor =
-            (material.yield_strength / stress.von_mises.max(DIV_EPSILON)).min(MAX_SAFETY_FACTOR);
-        let safety_zone = SafetyZone::from_factor(safety_factor);
+        let safety_factor = (capacity / total_risk.max(DIV_EPSILON)).min(MAX_SAFETY_FACTOR);
+        let zone = SafetyZone::from_factor(safety_factor);
 
         let file_path = graph
             .get_node(node_id)
             .map(|n| n.file_path.clone())
             .unwrap_or_default();
 
-        nodes.push(NodeStress {
+        nodes.push(NodeRisk {
             node_id: node_id.clone(),
             file_path,
-            material,
-            stress,
+            change_load,
+            structural_weight,
+            propagated_risk,
+            risk_score: total_risk,
+            capacity,
             safety_factor,
-            safety_zone,
+            zone,
         });
     }
 
@@ -308,48 +297,48 @@ fn compute_stress_field_with_loads(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    StressField {
+    RiskField {
         nodes,
         iterations,
         converged,
     }
 }
 
-/// Simulate a load case: apply pressure multipliers and compute resulting stress.
+/// Simulate a load case: apply pressure multipliers and compute resulting risk.
 pub fn simulate_load_case(
     graph: &UnifiedGraph,
     config: &Config,
     load_case: &LoadCase,
-) -> StressField {
+) -> RiskField {
     let multipliers: HashMap<String, f64> = load_case
         .loads
         .iter()
         .map(|lp| (lp.node_id.clone(), lp.pressure))
         .collect();
-    compute_stress_field_with_loads(graph, config, &multipliers)
+    compute_risk_field_with_loads(graph, config, &multipliers)
 }
 
-/// Compare two stress fields to produce per-node deltas.
-pub fn compare_stress_fields(before: &StressField, after: &StressField) -> StressDelta {
-    let before_map: HashMap<&str, &NodeStress> = before
+/// Compare two risk fields to produce per-node deltas.
+pub fn compare_risk_fields(before: &RiskField, after: &RiskField) -> RiskDelta {
+    let before_map: HashMap<&str, &NodeRisk> = before
         .nodes
         .iter()
         .map(|n| (n.node_id.as_str(), n))
         .collect();
 
-    let mut deltas: Vec<NodeStressDelta> = Vec::new();
+    let mut deltas: Vec<NodeRiskDelta> = Vec::new();
 
     for after_node in &after.nodes {
         if let Some(before_node) = before_map.get(after_node.node_id.as_str()) {
-            deltas.push(NodeStressDelta {
+            deltas.push(NodeRiskDelta {
                 node_id: after_node.node_id.clone(),
                 file_path: after_node.file_path.clone(),
-                von_mises_before: before_node.stress.von_mises,
-                von_mises_after: after_node.stress.von_mises,
+                risk_before: before_node.risk_score,
+                risk_after: after_node.risk_score,
                 safety_factor_before: before_node.safety_factor,
                 safety_factor_after: after_node.safety_factor,
-                zone_before: before_node.safety_zone,
-                zone_after: after_node.safety_zone,
+                zone_before: before_node.zone,
+                zone_after: after_node.zone,
             });
         }
     }
@@ -363,7 +352,7 @@ pub fn compare_stress_fields(before: &StressField, after: &StressField) -> Stres
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    StressDelta { deltas }
+    RiskDelta { deltas }
 }
 
 /// Generate a load case for a single-file change scenario.
@@ -415,7 +404,7 @@ mod tests {
         b.loc = Some(200);
         g.add_node(b);
 
-        // Module C: low complexity
+        // Module C: low complexity, no change data
         let mut c = Node::module("c.py", "c.py");
         c.complexity = Some(10);
         c.loc = Some(50);
@@ -452,107 +441,98 @@ mod tests {
                 ..Default::default()
             },
         );
-        // C has no change metrics (never changed)
 
         g
     }
 
     #[test]
-    fn test_material_properties_basic() {
-        let g = make_test_graph();
-        let config = Config::default();
-        let maxes = collect_maxes(&g);
-
-        let mat_a = compute_material(&g, "a.py", &maxes, &config);
-        // complexity=100/100=1.0, cbo: a.py imports b.py → cbo=1, max_cbo=1 → 1.0
-        // stiffness = 1.0 * 1.0 = 1.0
-        assert!((mat_a.stiffness - 1.0).abs() < 0.01);
-        assert!((mat_a.yield_strength - 0.5).abs() < f64::EPSILON);
-        // churn_rate=20.0, max=20.0 → fatigue_life = 20/20 = 1.0
-        assert!((mat_a.fatigue_life - 1.0).abs() < 0.01);
-        // fan_in=0, fan_out=1 (structural) → cross_section=1.0
-        assert!((mat_a.cross_section - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_material_properties_no_change_data() {
-        let g = make_test_graph();
-        let config = Config::default();
-        let maxes = collect_maxes(&g);
-
-        // c.py has no change metrics
-        let mat_c = compute_material(&g, "c.py", &maxes, &config);
-        // No churn → fatigue_life = MAX
-        assert!((mat_c.fatigue_life - MAX_SAFETY_FACTOR).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_stress_tensor_computation() {
+    fn test_change_load() {
         let g = make_test_graph();
         let maxes = collect_maxes(&g);
 
-        let stress_a = compute_local_stress(&g, "a.py", &maxes, 1.0);
-        // change_pressure = normalize(30*20.0, 600.0) = 1.0
-        assert!((stress_a.change_pressure - 1.0).abs() < 0.01);
-        // tensile: fan_out=1, fan_in=0, total=2 → 1/2 * 1.0 = 0.5
-        assert!((stress_a.tensile - 0.5).abs() < 0.01);
-        // von_mises should be positive and in [0, ~1.5] range
-        assert!(stress_a.von_mises > 0.0);
-        assert!(stress_a.von_mises < 2.0);
+        // a.py: raw = 30*20 = 600, max = 600 → normalized = 1.0
+        let load_a = compute_change_load(&g, "a.py", &maxes, 1.0);
+        assert!((load_a - 1.0).abs() < 0.01);
+
+        // b.py: raw = 10*10 = 100, max = 600 → normalized ≈ 0.167
+        let load_b = compute_change_load(&g, "b.py", &maxes, 1.0);
+        assert!((load_b - 100.0 / 600.0).abs() < 0.01);
+
+        // c.py: no change data → 0
+        let load_c = compute_change_load(&g, "c.py", &maxes, 1.0);
+        assert!((load_c - 0.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_von_mises_pure_math() {
-        // von_mises = sqrt(t^2 + c^2 - t*c)
-        let t = 3.0_f64;
-        let c = 4.0_f64;
-        let expected = (t * t + c * c - t * c).sqrt(); // sqrt(9+16-12) = sqrt(13)
-        assert!((expected - 13.0_f64.sqrt()).abs() < 1e-10);
+    fn test_capacity() {
+        let g = make_test_graph();
+        let maxes = collect_maxes(&g);
+
+        // a.py: max complexity → burden high → capacity low
+        let cap_a = compute_capacity(&g, "a.py", &maxes);
+        // c.py: low complexity → burden low → capacity high
+        let cap_c = compute_capacity(&g, "c.py", &maxes);
+        assert!(cap_a < cap_c);
+        assert!(cap_a >= MIN_CAPACITY);
+        assert!(cap_c <= 1.0);
     }
 
     #[test]
-    fn test_safety_factor_zero_stress() {
+    fn test_risk_field_ordering() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_stress_field(&g, &config);
+        let field = compute_risk_field(&g, &config);
 
-        // c.py has no change data but has structural properties (fan_in=1, complexity=10, loc=50)
-        // With structural compressive stress, it should have a finite (but small) von_mises
-        let c_stress = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
-        // c.py has low complexity and coupling so stress is small
-        assert!(c_stress.stress.von_mises >= 0.0);
-        // c.py should have less stress than a.py (the hotspot)
-        let a_stress = field.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
-        assert!(c_stress.stress.von_mises < a_stress.stress.von_mises);
+        // a.py should have lowest SF (highest risk): most change + most complex
+        assert_eq!(field.nodes[0].node_id, "a.py");
+
+        // Sorted by SF ascending
+        for pair in field.nodes.windows(2) {
+            assert!(pair[0].safety_factor <= pair[1].safety_factor);
+        }
     }
 
     #[test]
-    fn test_safety_zone_boundaries() {
-        assert_eq!(SafetyZone::from_factor(0.5), SafetyZone::Critical);
-        assert_eq!(SafetyZone::from_factor(1.0), SafetyZone::Danger);
-        assert_eq!(SafetyZone::from_factor(1.5), SafetyZone::Warning);
-        assert_eq!(SafetyZone::from_factor(2.0), SafetyZone::Healthy);
-        assert_eq!(SafetyZone::from_factor(5.0), SafetyZone::OverEngineered);
-    }
-
-    #[test]
-    fn test_stress_propagation_converges() {
+    fn test_no_change_module_safe() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_stress_field(&g, &config);
+        let field = compute_risk_field(&g, &config);
+
+        // c.py has no change data → change_load = 0, risk ≈ propagated only
+        let c = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
+        assert_eq!(c.change_load, 0.0);
+        // Should be safer than a.py
+        let a = field.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
+        assert!(c.safety_factor > a.safety_factor);
+    }
+
+    #[test]
+    fn test_propagation_converges() {
+        let g = make_test_graph();
+        let config = Config::default();
+        let field = compute_risk_field(&g, &config);
 
         assert!(field.converged);
         assert!(field.iterations > 0);
-
-        // a.py and b.py are connected by CoChanges — b.py should receive propagated stress
-        let b_stress = field.nodes.iter().find(|n| n.node_id == "b.py").unwrap();
-        // b.py's propagated von_mises should be > its local von_mises due to a.py's contribution
-        // We can verify it's non-zero since b.py has change data
-        assert!(b_stress.stress.von_mises > 0.0);
     }
 
     #[test]
-    fn test_stress_propagation_isolated_nodes() {
+    fn test_propagation_adds_risk() {
+        let g = make_test_graph();
+        let config = Config::default();
+        let field = compute_risk_field(&g, &config);
+
+        // b.py should have propagated risk from a.py (via CoChanges + Imports)
+        let b = field.nodes.iter().find(|n| n.node_id == "b.py").unwrap();
+        assert!(b.propagated_risk > 0.0);
+
+        // c.py should have some propagated risk from b.py (via Imports)
+        let c = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
+        assert!(c.propagated_risk > 0.0);
+    }
+
+    #[test]
+    fn test_isolated_node() {
         let mut g = UnifiedGraph::new();
         let mut a = Node::module("a.py", "a.py");
         a.complexity = Some(50);
@@ -569,25 +549,21 @@ mod tests {
         );
 
         let config = Config::default();
-        let field = compute_stress_field(&g, &config);
+        let field = compute_risk_field(&g, &config);
 
-        // Single isolated node, no edges — converges immediately
         assert!(field.converged);
         assert_eq!(field.nodes.len(), 1);
-        // fan_out=0 → tensile=0, but compressive exists from structural weight
-        // (averaged LOC + complexity + coupling). Coupling=0 but LOC and complexity
-        // are maxes (only node), so compressive = (1.0 + 1.0 + 0.0) / 3 ≈ 0.667
-        assert!(field.nodes[0].stress.von_mises > 0.0);
-        assert!(field.nodes[0].stress.tensile == 0.0);
-        assert!(field.nodes[0].stress.compressive > 0.0);
+        // Isolated node: change_load > 0, propagated = 0
+        assert!(field.nodes[0].change_load > 0.0);
+        assert!((field.nodes[0].propagated_risk - 0.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_simulate_load_case() {
+    fn test_simulate_increases_risk() {
         let g = make_test_graph();
         let config = Config::default();
 
-        let baseline = compute_stress_field(&g, &config);
+        let baseline = compute_risk_field(&g, &config);
         let load = LoadCase {
             name: "test".to_string(),
             loads: vec![LoadPoint {
@@ -597,18 +573,22 @@ mod tests {
         };
         let loaded = simulate_load_case(&g, &config, &load);
 
-        // a.py raw stress should increase under load
+        // a.py risk should increase under load
         let baseline_a = baseline.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
         let loaded_a = loaded.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
-        assert!(loaded_a.stress.von_mises > baseline_a.stress.von_mises);
+        assert!(loaded_a.risk_score > baseline_a.risk_score);
+        // Capacity stays the same
+        assert!((loaded_a.capacity - baseline_a.capacity).abs() < 0.001);
+        // SF decreases
+        assert!(loaded_a.safety_factor < baseline_a.safety_factor);
     }
 
     #[test]
-    fn test_compare_stress_fields() {
+    fn test_compare_risk_fields() {
         let g = make_test_graph();
         let config = Config::default();
 
-        let before = compute_stress_field(&g, &config);
+        let before = compute_risk_field(&g, &config);
         let load = LoadCase {
             name: "test".to_string(),
             loads: vec![LoadPoint {
@@ -617,10 +597,9 @@ mod tests {
             }],
         };
         let after = simulate_load_case(&g, &config, &load);
+        let delta = compare_risk_fields(&before, &after);
 
-        let delta = compare_stress_fields(&before, &after);
         assert!(!delta.deltas.is_empty());
-
         // First delta should have the largest SF decrease
         let first = &delta.deltas[0];
         assert!(first.safety_factor_before >= first.safety_factor_after);
@@ -632,7 +611,6 @@ mod tests {
         let load = single_file_change(&g, "a.py");
 
         assert_eq!(load.name, "single_file_change:a.py");
-        // Should have a.py at 2.0 and b.py at 1.5 (co-change neighbor)
         assert!(
             load.loads
                 .iter()
@@ -643,17 +621,5 @@ mod tests {
                 .iter()
                 .any(|lp| lp.node_id == "b.py" && lp.pressure == 1.5)
         );
-    }
-
-    #[test]
-    fn test_stress_field_sorted_by_safety_factor() {
-        let g = make_test_graph();
-        let config = Config::default();
-        let field = compute_stress_field(&g, &config);
-
-        // Verify nodes are sorted by safety_factor ascending
-        for pair in field.nodes.windows(2) {
-            assert!(pair[0].safety_factor <= pair[1].safety_factor);
-        }
     }
 }

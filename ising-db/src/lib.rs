@@ -51,19 +51,17 @@ pub struct DbStats {
     pub change_edges: usize,
 }
 
-/// Stored stress data for a node.
+/// Stored risk data for a node.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct StoredStress {
+pub struct StoredRisk {
     pub node_id: String,
-    pub stiffness: f64,
-    pub yield_strength: f64,
-    pub fatigue_life: f64,
-    pub cross_section: f64,
-    pub tensile_stress: f64,
-    pub compressive_stress: f64,
-    pub von_mises_stress: f64,
+    pub change_load: f64,
+    pub structural_weight: f64,
+    pub propagated_risk: f64,
+    pub risk_score: f64,
+    pub capacity: f64,
     pub safety_factor: f64,
-    pub safety_zone: String,
+    pub zone: String,
 }
 
 /// Database handle for Ising storage.
@@ -92,7 +90,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ising_core::fea::{MaterialProperties, NodeStress, SafetyZone, StressField, StressTensor};
+    use ising_core::fea::{NodeRisk, RiskField, SafetyZone};
     use ising_core::graph::{ChangeMetrics, EdgeType, Node, UnifiedGraph};
 
     #[test]
@@ -228,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_and_query_stress() {
+    fn test_store_and_query_risk() {
         let db = Database::open_in_memory().unwrap();
 
         // Need nodes first for FK constraint
@@ -237,40 +235,36 @@ mod tests {
         graph.add_node(Node::module("b", "b.py"));
         db.store_graph(&graph).unwrap();
 
-        let field = StressField {
+        let field = RiskField {
             nodes: vec![
-                NodeStress {
+                NodeRisk {
                     node_id: "a".to_string(),
                     file_path: "a.py".to_string(),
-                    material: MaterialProperties {
-                        stiffness: 0.8,
-                        yield_strength: 0.5,
-                        fatigue_life: 1.5,
-                        cross_section: 3.0,
-                    },
-                    stress: StressTensor {
-                        change_pressure: 100.0,
-                        tensile: 30.0,
-                        compressive: 40.0,
-                        von_mises: 36.0,
-                    },
-                    safety_factor: 0.014,
-                    safety_zone: SafetyZone::Critical,
+                    change_load: 0.9,
+                    structural_weight: 0.7,
+                    propagated_risk: 0.1,
+                    risk_score: 1.0,
+                    capacity: 0.3,
+                    safety_factor: 0.3,
+                    zone: SafetyZone::Critical,
                 },
-                NodeStress {
+                NodeRisk {
                     node_id: "b".to_string(),
                     file_path: "b.py".to_string(),
-                    material: MaterialProperties::default(),
-                    stress: StressTensor::default(),
+                    change_load: 0.0,
+                    structural_weight: 0.1,
+                    propagated_risk: 0.0,
+                    risk_score: 0.0,
+                    capacity: 0.9,
                     safety_factor: 10.0,
-                    safety_zone: SafetyZone::OverEngineered,
+                    zone: SafetyZone::OverEngineered,
                 },
             ],
             iterations: 5,
             converged: true,
         };
 
-        db.store_stress_field(&field).unwrap();
+        db.store_risk_field(&field).unwrap();
 
         // Query ranking — "a" should be first (lowest SF)
         let ranking = db.get_safety_ranking(10).unwrap();
@@ -279,9 +273,9 @@ mod tests {
         assert!(ranking[0].safety_factor < ranking[1].safety_factor);
 
         // Query by node
-        let stress_a = db.get_node_stress("a").unwrap().unwrap();
-        assert_eq!(stress_a.safety_zone, "critical");
-        assert!((stress_a.von_mises_stress - 36.0).abs() < 0.01);
+        let risk_a = db.get_node_risk("a").unwrap().unwrap();
+        assert_eq!(risk_a.zone, "critical");
+        assert!((risk_a.risk_score - 1.0).abs() < 0.01);
 
         // Query by zone
         let critical = db.get_nodes_by_zone("critical").unwrap();

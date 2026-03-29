@@ -31,9 +31,9 @@ enum Commands {
     Stats(StatsArgs),
     /// Export the graph in various formats
     Export(ExportArgs),
-    /// Show safety factor analysis for all modules (FEA)
+    /// Show safety factor analysis for all modules
     Safety(SafetyArgs),
-    /// Simulate a load case and show stress impact (FEA)
+    /// Simulate a load case and show risk impact
     Simulate(SimulateArgs),
     /// Start the MCP server for AI agent integration
     Serve(ServeArgs),
@@ -244,19 +244,19 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
         )?;
     }
 
-    // Compute and store stress field (FEA)
-    let stress_field = stress::compute_stress_field(&graph, &config);
-    db.store_stress_field(&stress_field)?;
+    // Compute and store risk field
+    let risk_field = stress::compute_risk_field(&graph, &config);
+    db.store_risk_field(&risk_field)?;
 
-    let critical_count = stress_field
+    let critical_count = risk_field
         .nodes
         .iter()
-        .filter(|n| n.safety_zone == SafetyZone::Critical)
+        .filter(|n| n.zone == SafetyZone::Critical)
         .count();
-    let danger_count = stress_field
+    let danger_count = risk_field
         .nodes
         .iter()
-        .filter(|n| n.safety_zone == SafetyZone::Danger)
+        .filter(|n| n.zone == SafetyZone::Danger)
         .count();
 
     // Store build metadata
@@ -275,12 +275,12 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     eprintln!("  Cycles:           {}", metrics.cycle_count);
     eprintln!("  Signals:          {}", signals.len());
     eprintln!(
-        "  Stress field:     {} modules ({} critical, {} danger, converged={} in {} iter)",
-        stress_field.nodes.len(),
+        "  Risk analysis:    {} modules ({} critical, {} danger, converged={} in {} iter)",
+        risk_field.nodes.len(),
         critical_count,
         danger_count,
-        stress_field.converged,
-        stress_field.iterations,
+        risk_field.converged,
+        risk_field.iterations,
     );
 
     if !signals.is_empty() {
@@ -483,7 +483,7 @@ fn cmd_safety(args: SafetyArgs) -> Result<i32> {
     };
 
     if results.is_empty() {
-        eprintln!("No stress data found. Run `ising build` first.");
+        eprintln!("No risk data found. Run `ising build` first.");
         return Ok(1);
     }
 
@@ -500,18 +500,19 @@ fn cmd_safety(args: SafetyArgs) -> Result<i32> {
             println!("{title}");
             println!("{}", "═".repeat(80));
             println!(
-                "  {:>4}  {:<45} {:>8} {:>6} {:>10}",
-                "Rank", "File", "σ_vm", "SF", "Zone"
+                "  {:>4}  {:<45} {:>6} {:>5} {:>6} {:>10}",
+                "Rank", "File", "Risk", "Cap", "SF", "Zone"
             );
             println!("{}", "─".repeat(80));
             for (i, s) in results.iter().enumerate() {
                 println!(
-                    "  {:>4}  {:<45} {:>8.2} {:>6.2} {:>10}",
+                    "  {:>4}  {:<45} {:>6.2} {:>5.2} {:>6.2} {:>10}",
                     i + 1,
                     truncate_path(&s.node_id, 45),
-                    s.von_mises_stress,
+                    s.risk_score,
+                    s.capacity,
                     s.safety_factor,
-                    s.safety_zone.to_uppercase(),
+                    s.zone.to_uppercase(),
                 );
             }
         }
@@ -539,10 +540,10 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
         stress::single_file_change(&graph, &args.target)
     };
 
-    // Compute baseline and loaded stress fields
-    let baseline = stress::compute_stress_field(&graph, &config);
+    // Compute baseline and loaded risk fields
+    let baseline = stress::compute_risk_field(&graph, &config);
     let loaded = stress::simulate_load_case(&graph, &config, &load_case);
-    let delta = stress::compare_stress_fields(&baseline, &loaded);
+    let delta = stress::compare_risk_fields(&baseline, &loaded);
 
     match args.format {
         OutputFormat::Json => {
@@ -550,12 +551,12 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
         }
         OutputFormat::Text => {
             println!("Load Case Simulation: {}", load_case.name);
-            println!("{}", "═".repeat(90));
+            println!("{}", "═".repeat(86));
             println!(
-                "  {:<40} {:>8} {:>8} {:>6} {:>6} {:>10}",
-                "File", "σ_vm↑", "σ_vm↓", "SF↑", "SF↓", "Zone→"
+                "  {:<40} {:>7} {:>7} {:>6} {:>6} {:>12}",
+                "File", "Risk↑", "Risk↓", "SF↑", "SF↓", "Zone→"
             );
-            println!("{}", "─".repeat(90));
+            println!("{}", "─".repeat(86));
 
             let shown: Vec<_> = delta
                 .deltas
@@ -565,7 +566,7 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
                 .collect();
 
             if shown.is_empty() {
-                println!("  No significant stress changes detected.");
+                println!("  No significant risk changes detected.");
             } else {
                 for d in &shown {
                     let zone_change = if d.zone_before != d.zone_after {
@@ -574,10 +575,10 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
                         format!("{}", d.zone_after)
                     };
                     println!(
-                        "  {:<40} {:>8.2} {:>8.2} {:>6.2} {:>6.2} {:>10}",
+                        "  {:<40} {:>7.2} {:>7.2} {:>6.2} {:>6.2} {:>12}",
                         truncate_path(&d.node_id, 40),
-                        d.von_mises_before,
-                        d.von_mises_after,
+                        d.risk_before,
+                        d.risk_after,
                         d.safety_factor_before,
                         d.safety_factor_after,
                         zone_change,

@@ -91,19 +91,19 @@ pub struct PercentileConfig {
     pub ticking_bomb_coupling: u32,
 }
 
-/// FEA (Finite Element Analysis) configuration for stress computation.
+/// Risk propagation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeaConfig {
-    /// Default yield_strength when no test coverage data is available.
-    #[serde(default = "default_yield_strength")]
-    pub default_yield_strength: f64,
-    /// Damping factor for stress propagation (0.0–1.0).
-    #[serde(default = "default_damping")]
-    pub damping: f64,
-    /// Convergence epsilon for Jacobi iteration.
+    /// Damping factor for risk propagation via co-change edges (0.0–1.0).
+    #[serde(default = "default_cochange_damping")]
+    pub cochange_damping: f64,
+    /// Damping factor for risk propagation via structural (import) edges (0.0–1.0).
+    #[serde(default = "default_structural_damping")]
+    pub structural_damping: f64,
+    /// Convergence epsilon for propagation iteration.
     #[serde(default = "default_epsilon")]
     pub epsilon: f64,
-    /// Maximum Jacobi iterations.
+    /// Maximum propagation iterations.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
 }
@@ -111,19 +111,19 @@ pub struct FeaConfig {
 impl Default for FeaConfig {
     fn default() -> Self {
         Self {
-            default_yield_strength: default_yield_strength(),
-            damping: default_damping(),
+            cochange_damping: default_cochange_damping(),
+            structural_damping: default_structural_damping(),
             epsilon: default_epsilon(),
             max_iterations: default_max_iterations(),
         }
     }
 }
 
-fn default_yield_strength() -> f64 {
-    0.5
-}
-fn default_damping() -> f64 {
+fn default_cochange_damping() -> f64 {
     0.3
+}
+fn default_structural_damping() -> f64 {
+    0.15
 }
 fn default_epsilon() -> f64 {
     0.001
