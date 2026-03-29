@@ -25,6 +25,7 @@ struct GraphMaxes {
     cbo: f64,
     loc: f64,
     churn_rate: f64,
+    change_pressure: f64,
 }
 
 /// Collect normalization maxes from all Module-type nodes.
@@ -33,6 +34,8 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
     let mut max_cbo: f64 = 0.0;
     let mut max_loc: f64 = 0.0;
     let mut max_churn_rate: f64 = 0.0;
+
+    let mut max_change_pressure: f64 = 0.0;
 
     for node_id in graph.node_ids() {
         let node = match graph.get_node(node_id) {
@@ -48,6 +51,8 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
 
         if let Some(cm) = graph.change_metrics.get(node_id) {
             max_churn_rate = max_churn_rate.max(cm.churn_rate);
+            max_change_pressure =
+                max_change_pressure.max(cm.change_freq as f64 * cm.churn_rate);
         }
     }
 
@@ -56,6 +61,7 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
         cbo: max_cbo,
         loc: max_loc,
         churn_rate: max_churn_rate,
+        change_pressure: max_change_pressure,
     }
 }
 
@@ -117,7 +123,8 @@ fn compute_local_stress(
     let change_freq = cm.map(|c| c.change_freq as f64).unwrap_or(0.0);
     let churn_rate = cm.map(|c| c.churn_rate).unwrap_or(0.0);
 
-    let change_pressure = change_freq * churn_rate * pressure_multiplier;
+    let raw_pressure = change_freq * churn_rate;
+    let change_pressure = normalize(raw_pressure, maxes.change_pressure) * pressure_multiplier;
 
     let fan_total = (metrics.fan_in + metrics.fan_out + 1) as f64;
     let tensile = (metrics.fan_out as f64 / fan_total) * change_pressure;
@@ -456,12 +463,13 @@ mod tests {
         let maxes = collect_maxes(&g);
 
         let stress_a = compute_local_stress(&g, "a.py", &maxes, 1.0);
-        // change_pressure = 30 * 20.0 = 600.0
-        assert!((stress_a.change_pressure - 600.0).abs() < 0.01);
-        // tensile: fan_out=1, fan_in=0, total=2 → 1/2 * 600 = 300
-        assert!((stress_a.tensile - 300.0).abs() < 0.01);
-        // von_mises should be positive
+        // change_pressure = normalize(30*20.0, 600.0) = 1.0
+        assert!((stress_a.change_pressure - 1.0).abs() < 0.01);
+        // tensile: fan_out=1, fan_in=0, total=2 → 1/2 * 1.0 = 0.5
+        assert!((stress_a.tensile - 0.5).abs() < 0.01);
+        // von_mises should be positive and in [0, ~1.5] range
         assert!(stress_a.von_mises > 0.0);
+        assert!(stress_a.von_mises < 2.0);
     }
 
     #[test]
