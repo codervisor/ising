@@ -316,11 +316,7 @@ fn detect_over_engineering(
     signals
 }
 
-fn detect_stable_cores(
-    node_ids: &[String],
-    graph: &UnifiedGraph,
-    config: &Config,
-) -> Vec<Signal> {
+fn detect_stable_cores(node_ids: &[String], graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     let mut change_freqs: Vec<f64> = node_ids
         .iter()
         .filter_map(|id| {
@@ -366,11 +362,7 @@ fn detect_stable_cores(
     signals
 }
 
-fn detect_ticking_bombs(
-    node_ids: &[String],
-    graph: &UnifiedGraph,
-    config: &Config,
-) -> Vec<Signal> {
+fn detect_ticking_bombs(node_ids: &[String], graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     let mut hotspots: Vec<f64> = node_ids
         .iter()
         .filter_map(|id| {
@@ -515,8 +507,7 @@ fn detect_god_modules(
             && !is_test_file(node_id)
             && !is_generated_code(node_id)
         {
-            let severity =
-                (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (cbo as f64 / 15.0);
+            let severity = (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (cbo as f64 / 15.0);
             signals.push(Signal::new(
                 SignalType::GodModule,
                 node_id,

@@ -65,11 +65,26 @@ impl Database {
                 value TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS stress_data (
+                node_id TEXT PRIMARY KEY,
+                stiffness REAL,
+                yield_strength REAL,
+                fatigue_life REAL,
+                cross_section REAL,
+                tensile_stress REAL,
+                compressive_stress REAL,
+                von_mises_stress REAL,
+                safety_factor REAL,
+                safety_zone TEXT,
+                FOREIGN KEY (node_id) REFERENCES nodes(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
             CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
             CREATE INDEX IF NOT EXISTS idx_edges_layer ON edges(layer);
             CREATE INDEX IF NOT EXISTS idx_signals_type ON signals(signal_type);
             CREATE INDEX IF NOT EXISTS idx_signals_severity ON signals(severity DESC);
+            CREATE INDEX IF NOT EXISTS idx_stress_safety ON stress_data(safety_factor ASC);
             ",
         )?;
         Ok(())
@@ -79,6 +94,7 @@ impl Database {
     pub fn clear(&self) -> Result<(), DbError> {
         self.conn.execute_batch(
             "
+            DELETE FROM stress_data;
             DELETE FROM signals;
             DELETE FROM change_metrics;
             DELETE FROM defect_metrics;

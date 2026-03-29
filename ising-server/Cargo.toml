@@ -6,6 +6,8 @@ license.workspace = true
 description = "MCP server for the Ising code graph analysis engine"
 
 [dependencies]
+ising-core = { path = "../ising-core" }
+ising-analysis = { path = "../ising-analysis" }
 ising-db = { path = "../ising-db" }
 axum.workspace = true
 tokio.workspace = true

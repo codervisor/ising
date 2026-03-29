@@ -5,3 +5,4 @@
 
 pub mod hotspots;
 pub mod signals;
+pub mod stress;

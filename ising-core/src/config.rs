@@ -12,6 +12,8 @@ pub struct Config {
     pub thresholds: ThresholdConfig,
     #[serde(default)]
     pub percentiles: PercentileConfig,
+    #[serde(default)]
+    pub fea: FeaConfig,
 }
 
 /// Build configuration.
@@ -87,6 +89,47 @@ pub struct PercentileConfig {
     /// Coupling percentile for ticking bomb (top N%).
     #[serde(default = "default_p80")]
     pub ticking_bomb_coupling: u32,
+}
+
+/// FEA (Finite Element Analysis) configuration for stress computation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeaConfig {
+    /// Default yield_strength when no test coverage data is available.
+    #[serde(default = "default_yield_strength")]
+    pub default_yield_strength: f64,
+    /// Damping factor for stress propagation (0.0–1.0).
+    #[serde(default = "default_damping")]
+    pub damping: f64,
+    /// Convergence epsilon for Jacobi iteration.
+    #[serde(default = "default_epsilon")]
+    pub epsilon: f64,
+    /// Maximum Jacobi iterations.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+}
+
+impl Default for FeaConfig {
+    fn default() -> Self {
+        Self {
+            default_yield_strength: default_yield_strength(),
+            damping: default_damping(),
+            epsilon: default_epsilon(),
+            max_iterations: default_max_iterations(),
+        }
+    }
+}
+
+fn default_yield_strength() -> f64 {
+    0.5
+}
+fn default_damping() -> f64 {
+    0.3
+}
+fn default_epsilon() -> f64 {
+    0.001
+}
+fn default_max_iterations() -> usize {
+    100
 }
 
 fn default_time_window() -> String {
