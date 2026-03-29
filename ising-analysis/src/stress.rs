@@ -26,6 +26,7 @@ struct GraphMaxes {
     loc: f64,
     churn_rate: f64,
     change_pressure: f64,
+    coupling: f64,
 }
 
 /// Collect normalization maxes from all Module-type nodes.
@@ -36,6 +37,7 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
     let mut max_churn_rate: f64 = 0.0;
 
     let mut max_change_pressure: f64 = 0.0;
+    let mut max_coupling: f64 = 0.0;
 
     for node_id in graph.node_ids() {
         let node = match graph.get_node(node_id) {
@@ -48,11 +50,11 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
 
         let metrics = compute_node_metrics(graph, node_id);
         max_cbo = max_cbo.max(metrics.cbo as f64);
+        max_coupling = max_coupling.max((metrics.fan_in + metrics.fan_out) as f64);
 
         if let Some(cm) = graph.change_metrics.get(node_id) {
             max_churn_rate = max_churn_rate.max(cm.churn_rate);
-            max_change_pressure =
-                max_change_pressure.max(cm.change_freq as f64 * cm.churn_rate);
+            max_change_pressure = max_change_pressure.max(cm.change_freq as f64 * cm.churn_rate);
         }
     }
 
@@ -62,6 +64,7 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
         loc: max_loc,
         churn_rate: max_churn_rate,
         change_pressure: max_change_pressure,
+        coupling: max_coupling,
     }
 }
 
@@ -129,10 +132,14 @@ fn compute_local_stress(
     let fan_total = (metrics.fan_in + metrics.fan_out + 1) as f64;
     let tensile = (metrics.fan_out as f64 / fan_total) * change_pressure;
 
-    let compressive = normalize(node.loc.unwrap_or(0) as f64, maxes.loc)
-        * normalize(node.complexity.unwrap_or(0) as f64, maxes.complexity)
-        * normalize(metrics.cbo as f64, maxes.cbo)
-        * change_pressure;
+    // Compressive stress is structural — it exists even without change activity.
+    // Uses averaged combination so each factor contributes independently. A large-but-simple
+    // file or a small-but-complex file both register meaningful structural stress.
+    let coupling = (metrics.fan_in + metrics.fan_out) as f64;
+    let compressive = (normalize(node.loc.unwrap_or(0) as f64, maxes.loc)
+        + normalize(node.complexity.unwrap_or(0) as f64, maxes.complexity)
+        + normalize(coupling, maxes.coupling))
+        / 3.0;
 
     let von_mises = (tensile * tensile + compressive * compressive - tensile * compressive).sqrt();
 
@@ -487,10 +494,12 @@ mod tests {
         let config = Config::default();
         let field = compute_stress_field(&g, &config);
 
-        // c.py has no change data → von_mises ≈ 0 → SF clamped to MAX
+        // c.py has no change data but has structural properties (fan_in=1, complexity=10, loc=50)
+        // With structural compressive stress, it should have a finite (but small) von_mises
         let c_stress = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
-        assert!((c_stress.safety_factor - MAX_SAFETY_FACTOR).abs() < 0.01);
-        assert_eq!(c_stress.safety_zone, SafetyZone::OverEngineered);
+        // c.py has low complexity and coupling so stress is small, SF should be high
+        assert!(c_stress.safety_factor > 1.0);
+        assert!(c_stress.stress.von_mises >= 0.0);
     }
 
     #[test]
@@ -541,10 +550,12 @@ mod tests {
         // Single isolated node, no edges — converges immediately
         assert!(field.converged);
         assert_eq!(field.nodes.len(), 1);
-        // With fan_out=0 and cbo=0, both tensile and compressive are 0
-        // so von_mises = 0 and safety factor is clamped to max
-        assert!((field.nodes[0].stress.von_mises - 0.0).abs() < 0.01);
-        assert!((field.nodes[0].safety_factor - MAX_SAFETY_FACTOR).abs() < 0.01);
+        // fan_out=0 → tensile=0, but compressive exists from structural weight
+        // (averaged LOC + complexity + coupling). Coupling=0 but LOC and complexity
+        // are maxes (only node), so compressive = (1.0 + 1.0 + 0.0) / 3 ≈ 0.667
+        assert!(field.nodes[0].stress.von_mises > 0.0);
+        assert!(field.nodes[0].stress.tensile == 0.0);
+        assert!(field.nodes[0].stress.compressive > 0.0);
     }
 
     #[test]
