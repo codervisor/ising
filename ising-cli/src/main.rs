@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use ising_analysis::signals::detect_signals;
+use ising_analysis::stress;
 use ising_core::config::Config;
+use ising_core::fea::{LoadCase, SafetyZone};
 use ising_core::metrics::compute_graph_metrics;
 use ising_db::Database;
 use std::path::PathBuf;
@@ -29,6 +31,10 @@ enum Commands {
     Stats(StatsArgs),
     /// Export the graph in various formats
     Export(ExportArgs),
+    /// Show safety factor analysis for all modules (FEA)
+    Safety(SafetyArgs),
+    /// Simulate a load case and show stress impact (FEA)
+    Simulate(SimulateArgs),
     /// Start the MCP server for AI agent integration
     Serve(ServeArgs),
 }
@@ -117,6 +123,37 @@ enum OutputFormat {
 }
 
 #[derive(clap::Args, Debug)]
+struct SafetyArgs {
+    /// Number of top results to show
+    #[arg(long, default_value = "20")]
+    top: usize,
+    /// Filter by safety zone (critical, danger, warning, healthy, over_engineered)
+    #[arg(long)]
+    zone: Option<String>,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(clap::Args, Debug)]
+struct SimulateArgs {
+    /// File path or load-case JSON file
+    target: String,
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Config file path
+    #[arg(long, default_value = "ising.toml")]
+    config: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(clap::Args, Debug)]
 struct ServeArgs {
     /// Port to listen on
     #[arg(long, default_value = "3000")]
@@ -163,6 +200,8 @@ fn run(cli: Cli) -> Result<i32> {
         Commands::Signals(args) => cmd_signals(args),
         Commands::Stats(args) => cmd_stats(args),
         Commands::Export(args) => cmd_export(args),
+        Commands::Safety(args) => cmd_safety(args),
+        Commands::Simulate(args) => cmd_simulate(args),
         Commands::Serve(args) => cmd_serve(args),
     }
 }
@@ -205,6 +244,21 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
         )?;
     }
 
+    // Compute and store stress field (FEA)
+    let stress_field = stress::compute_stress_field(&graph, &config);
+    db.store_stress_field(&stress_field)?;
+
+    let critical_count = stress_field
+        .nodes
+        .iter()
+        .filter(|n| n.safety_zone == SafetyZone::Critical)
+        .count();
+    let danger_count = stress_field
+        .nodes
+        .iter()
+        .filter(|n| n.safety_zone == SafetyZone::Danger)
+        .count();
+
     // Store build metadata
     let now = chrono::Utc::now().to_rfc3339();
     db.set_build_info("last_build", &now)?;
@@ -220,6 +274,14 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     eprintln!("  Defect edges:     {}", metrics.defect_edges);
     eprintln!("  Cycles:           {}", metrics.cycle_count);
     eprintln!("  Signals:          {}", signals.len());
+    eprintln!(
+        "  Stress field:     {} modules ({} critical, {} danger, converged={} in {} iter)",
+        stress_field.nodes.len(),
+        critical_count,
+        danger_count,
+        stress_field.converged,
+        stress_field.iterations,
+    );
 
     if !signals.is_empty() {
         eprintln!();
@@ -411,6 +473,132 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
     Ok(0)
 }
 
+fn cmd_safety(args: SafetyArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+
+    let results = if let Some(zone) = &args.zone {
+        db.get_nodes_by_zone(zone)?
+    } else {
+        db.get_safety_ranking(args.top)?
+    };
+
+    if results.is_empty() {
+        eprintln!("No stress data found. Run `ising build` first.");
+        return Ok(1);
+    }
+
+    match args.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        }
+        OutputFormat::Text => {
+            let title = if let Some(zone) = &args.zone {
+                format!("Safety Analysis — zone: {zone}")
+            } else {
+                format!("Safety Analysis — top {}", args.top)
+            };
+            println!("{title}");
+            println!("{}", "═".repeat(80));
+            println!(
+                "  {:>4}  {:<45} {:>8} {:>6} {:>10}",
+                "Rank", "File", "σ_vm", "SF", "Zone"
+            );
+            println!("{}", "─".repeat(80));
+            for (i, s) in results.iter().enumerate() {
+                println!(
+                    "  {:>4}  {:<45} {:>8.2} {:>6.2} {:>10}",
+                    i + 1,
+                    truncate_path(&s.node_id, 45),
+                    s.von_mises_stress,
+                    s.safety_factor,
+                    s.safety_zone.to_uppercase(),
+                );
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
+    let config = Config::load_or_default(&args.config);
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+
+    // Reconstruct graph from DB
+    let graph = db.load_graph()?;
+    if graph.node_count() == 0 {
+        eprintln!("No graph data found. Run `ising build` first.");
+        return Ok(1);
+    }
+
+    // Parse load case
+    let load_case = if args.target.ends_with(".json") {
+        let content = std::fs::read_to_string(&args.target)?;
+        serde_json::from_str::<LoadCase>(&content)?
+    } else {
+        stress::single_file_change(&graph, &args.target)
+    };
+
+    // Compute baseline and loaded stress fields
+    let baseline = stress::compute_stress_field(&graph, &config);
+    let loaded = stress::simulate_load_case(&graph, &config, &load_case);
+    let delta = stress::compare_stress_fields(&baseline, &loaded);
+
+    match args.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&delta)?);
+        }
+        OutputFormat::Text => {
+            println!("Load Case Simulation: {}", load_case.name);
+            println!("{}", "═".repeat(90));
+            println!(
+                "  {:<40} {:>8} {:>8} {:>6} {:>6} {:>10}",
+                "File", "σ_vm↑", "σ_vm↓", "SF↑", "SF↓", "Zone→"
+            );
+            println!("{}", "─".repeat(90));
+
+            let shown: Vec<_> = delta
+                .deltas
+                .iter()
+                .filter(|d| (d.safety_factor_before - d.safety_factor_after).abs() > 0.001)
+                .take(20)
+                .collect();
+
+            if shown.is_empty() {
+                println!("  No significant stress changes detected.");
+            } else {
+                for d in &shown {
+                    let zone_change = if d.zone_before != d.zone_after {
+                        format!("{} → {}", d.zone_before, d.zone_after)
+                    } else {
+                        format!("{}", d.zone_after)
+                    };
+                    println!(
+                        "  {:<40} {:>8.2} {:>8.2} {:>6.2} {:>6.2} {:>10}",
+                        truncate_path(&d.node_id, 40),
+                        d.von_mises_before,
+                        d.von_mises_after,
+                        d.safety_factor_before,
+                        d.safety_factor_after,
+                        zone_change,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+/// Truncate a path string to fit in a column width.
+fn truncate_path(path: &str, max_len: usize) -> String {
+    if path.len() <= max_len {
+        path.to_string()
+    } else {
+        format!("…{}", &path[path.len() - max_len + 1..])
+    }
+}
+
 fn cmd_serve(args: ServeArgs) -> Result<i32> {
     let db_path = args.db.to_str().unwrap_or("ising.db").to_string();
     let port = args.port;
@@ -509,5 +697,25 @@ mod tests {
     fn export_mermaid_parses() {
         let cli = Cli::try_parse_from(["ising", "export", "--format", "mermaid"]).unwrap();
         assert!(matches!(cli.command, Commands::Export(_)));
+    }
+
+    #[test]
+    fn safety_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "safety", "--top", "10"]).unwrap();
+        assert!(matches!(cli.command, Commands::Safety(_)));
+    }
+
+    #[test]
+    fn safety_command_with_zone_parses() {
+        let cli =
+            Cli::try_parse_from(["ising", "safety", "--zone", "critical", "--format", "json"])
+                .unwrap();
+        assert!(matches!(cli.command, Commands::Safety(_)));
+    }
+
+    #[test]
+    fn simulate_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "simulate", "src/main.rs"]).unwrap();
+        assert!(matches!(cli.command, Commands::Simulate(_)));
     }
 }

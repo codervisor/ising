@@ -30,6 +30,19 @@ struct SignalsQuery {
     min_severity: Option<f64>,
 }
 
+/// Query params for the safety endpoint.
+#[derive(Deserialize)]
+struct SafetyQuery {
+    top: Option<usize>,
+    zone: Option<String>,
+}
+
+/// Query params for the simulate endpoint.
+#[derive(Deserialize)]
+struct SimulateQuery {
+    target: String,
+}
+
 /// MCP tool listing response.
 #[derive(Serialize)]
 struct ToolList {
@@ -52,6 +65,8 @@ pub async fn serve(db_path: &str, port: u16) -> Result<(), Box<dyn std::error::E
         .route("/impact", get(impact_handler))
         .route("/signals", get(signals_handler))
         .route("/health", get(health_handler))
+        .route("/safety", get(safety_handler))
+        .route("/simulate", get(simulate_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -70,6 +85,14 @@ async fn list_tools() -> Json<ToolList> {
             ToolDefinition {
                 name: "ising_signals".to_string(),
                 description: "Get active risk signals, optionally filtered by type or severity".to_string(),
+            },
+            ToolDefinition {
+                name: "ising_safety".to_string(),
+                description: "Get safety factor rankings for modules — shows which code is closest to failure under current change pressure".to_string(),
+            },
+            ToolDefinition {
+                name: "ising_simulate".to_string(),
+                description: "Simulate a file change and see the stress impact on the codebase — predicts which modules will be most affected".to_string(),
             },
         ],
     })
@@ -119,5 +142,48 @@ async fn health_handler(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let json =
         serde_json::to_value(&stats).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json))
+}
+
+async fn safety_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SafetyQuery>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let results = if let Some(zone) = &query.zone {
+        db.get_nodes_by_zone(zone)
+    } else {
+        db.get_safety_ranking(query.top.unwrap_or(20))
+    }
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let json = serde_json::to_value(&results)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json))
+}
+
+async fn simulate_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SimulateQuery>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let graph = db
+        .load_graph()
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let config = ising_core::config::Config::default();
+    let load_case = ising_analysis::stress::single_file_change(&graph, &query.target);
+    let baseline = ising_analysis::stress::compute_stress_field(&graph, &config);
+    let loaded = ising_analysis::stress::simulate_load_case(&graph, &config, &load_case);
+    let delta = ising_analysis::stress::compare_stress_fields(&baseline, &loaded);
+
+    let json =
+        serde_json::to_value(&delta).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json))
 }

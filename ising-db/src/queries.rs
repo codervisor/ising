@@ -1,7 +1,8 @@
 //! CRUD queries for the Ising database.
 
-use crate::{Database, DbError, DbStats, ImpactResult, StoredSignal};
-use ising_core::graph::{ChangeMetrics, NodeType, UnifiedGraph};
+use crate::{Database, DbError, DbStats, ImpactResult, StoredSignal, StoredStress};
+use ising_core::fea::StressField;
+use ising_core::graph::{ChangeMetrics, DefectMetrics, EdgeType, Node, NodeType, UnifiedGraph};
 use rusqlite::{Result as SqlResult, params};
 
 impl Database {
@@ -302,6 +303,200 @@ impl Database {
         })
     }
 
+    /// Store a stress field to the database.
+    pub fn store_stress_field(&self, field: &StressField) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO stress_data
+                 (node_id, stiffness, yield_strength, fatigue_life, cross_section,
+                  tensile_stress, compressive_stress, von_mises_stress, safety_factor, safety_zone)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            for ns in &field.nodes {
+                let zone_str = serde_json::to_value(ns.safety_zone)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                stmt.execute(params![
+                    ns.node_id,
+                    ns.material.stiffness,
+                    ns.material.yield_strength,
+                    ns.material.fatigue_life,
+                    ns.material.cross_section,
+                    ns.stress.tensile,
+                    ns.stress.compressive,
+                    ns.stress.von_mises,
+                    ns.safety_factor,
+                    zone_str,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Query safety factors ranked by most critical first.
+    pub fn get_safety_ranking(&self, top_n: usize) -> Result<Vec<StoredStress>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, stiffness, yield_strength, fatigue_life, cross_section,
+                    tensile_stress, compressive_stress, von_mises_stress, safety_factor, safety_zone
+             FROM stress_data
+             ORDER BY safety_factor ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![top_n as i64], map_stress_row)?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Query stress data for a specific node.
+    pub fn get_node_stress(&self, node_id: &str) -> Result<Option<StoredStress>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, stiffness, yield_strength, fatigue_life, cross_section,
+                    tensile_stress, compressive_stress, von_mises_stress, safety_factor, safety_zone
+             FROM stress_data WHERE node_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![node_id], map_stress_row)?;
+        match rows.next() {
+            Some(Ok(s)) => Ok(Some(s)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
+    /// Query nodes by safety zone.
+    pub fn get_nodes_by_zone(&self, zone: &str) -> Result<Vec<StoredStress>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT node_id, stiffness, yield_strength, fatigue_life, cross_section,
+                    tensile_stress, compressive_stress, von_mises_stress, safety_factor, safety_zone
+             FROM stress_data WHERE safety_zone = ?1
+             ORDER BY safety_factor ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![zone], map_stress_row)?
+            .collect::<SqlResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Reconstruct a UnifiedGraph from the database.
+    pub fn load_graph(&self) -> Result<UnifiedGraph, DbError> {
+        let mut graph = UnifiedGraph::new();
+
+        // Load nodes
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, type, file_path, line_start, line_end, language, loc, complexity, nesting_depth
+                 FROM nodes",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let type_str: String = row.get(1)?;
+                let file_path: String = row.get(2)?;
+                let node_type = match type_str.as_str() {
+                    "module" => NodeType::Module,
+                    "class" => NodeType::Class,
+                    "function" => NodeType::Function,
+                    _ => NodeType::Import,
+                };
+                Ok(Node {
+                    id,
+                    node_type,
+                    file_path,
+                    language: row.get(5)?,
+                    line_start: row.get(3)?,
+                    line_end: row.get(4)?,
+                    loc: row.get(6)?,
+                    complexity: row.get(7)?,
+                    nesting_depth: row.get(8)?,
+                })
+            })?;
+            for node in rows {
+                graph.add_node(node?);
+            }
+        }
+
+        // Load edges
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT source, target, edge_type, weight FROM edges")?;
+            let rows = stmt.query_map([], |row| {
+                let source: String = row.get(0)?;
+                let target: String = row.get(1)?;
+                let edge_type_str: String = row.get(2)?;
+                let weight: f64 = row.get(3)?;
+                Ok((source, target, edge_type_str, weight))
+            })?;
+            for row in rows {
+                let (source, target, edge_type_str, weight) = row?;
+                let edge_type = match edge_type_str.as_str() {
+                    "calls" => EdgeType::Calls,
+                    "imports" => EdgeType::Imports,
+                    "inherits" => EdgeType::Inherits,
+                    "contains" => EdgeType::Contains,
+                    "co_changes" => EdgeType::CoChanges,
+                    "change_propagates" => EdgeType::ChangePropagates,
+                    "fault_propagates" => EdgeType::FaultPropagates,
+                    "co_fix" => EdgeType::CoFix,
+                    _ => continue,
+                };
+                let _ = graph.add_edge(&source, &target, edge_type, weight);
+            }
+        }
+
+        // Load change metrics
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT node_id, change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed
+                 FROM change_metrics",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let node_id: String = row.get(0)?;
+                Ok((
+                    node_id,
+                    ChangeMetrics {
+                        change_freq: row.get(1)?,
+                        churn_lines: row.get(2)?,
+                        churn_rate: row.get(3)?,
+                        hotspot_score: row.get(4)?,
+                        sum_coupling: row.get(5)?,
+                        last_changed: row.get(6)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (node_id, cm) = row?;
+                graph.change_metrics.insert(node_id, cm);
+            }
+        }
+
+        // Load defect metrics
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT node_id, bug_count, defect_density, fix_inducing_rate FROM defect_metrics",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let node_id: String = row.get(0)?;
+                Ok((
+                    node_id,
+                    DefectMetrics {
+                        bug_count: row.get(1)?,
+                        defect_density: row.get(2)?,
+                        fix_inducing_rate: row.get(3)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (node_id, dm) = row?;
+                graph.defect_metrics.insert(node_id, dm);
+            }
+        }
+
+        Ok(graph)
+    }
+
     /// Get basic stats about the stored graph.
     pub fn get_stats(&self) -> Result<DbStats, DbError> {
         let node_count: i64 = self
@@ -332,6 +527,21 @@ impl Database {
             change_edges: change_edges as usize,
         })
     }
+}
+
+fn map_stress_row(row: &rusqlite::Row<'_>) -> SqlResult<StoredStress> {
+    Ok(StoredStress {
+        node_id: row.get(0)?,
+        stiffness: row.get(1)?,
+        yield_strength: row.get(2)?,
+        fatigue_life: row.get(3)?,
+        cross_section: row.get(4)?,
+        tensile_stress: row.get(5)?,
+        compressive_stress: row.get(6)?,
+        von_mises_stress: row.get(7)?,
+        safety_factor: row.get(8)?,
+        safety_zone: row.get(9)?,
+    })
 }
 
 fn map_signal_row(row: &rusqlite::Row<'_>) -> SqlResult<StoredSignal> {

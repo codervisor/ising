@@ -123,9 +123,7 @@ impl Database {
             let safe_id = id.replace(['/', '.', ':'], "_");
             let label = id.replace('"', "");
             if *score > 0.7 {
-                out.push_str(&format!(
-                    "  {safe_id}[\"{label}\\n🔥 {score:.2}\"]:::hot\n"
-                ));
+                out.push_str(&format!("  {safe_id}[\"{label}\\n🔥 {score:.2}\"]:::hot\n"));
             } else {
                 out.push_str(&format!("  {safe_id}[\"{label}\\n{score:.2}\"]\n"));
             }

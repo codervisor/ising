@@ -51,6 +51,21 @@ pub struct DbStats {
     pub change_edges: usize,
 }
 
+/// Stored stress data for a node.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoredStress {
+    pub node_id: String,
+    pub stiffness: f64,
+    pub yield_strength: f64,
+    pub fatigue_life: f64,
+    pub cross_section: f64,
+    pub tensile_stress: f64,
+    pub compressive_stress: f64,
+    pub von_mises_stress: f64,
+    pub safety_factor: f64,
+    pub safety_zone: String,
+}
+
 /// Database handle for Ising storage.
 pub struct Database {
     pub(crate) conn: Connection,
@@ -77,6 +92,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ising_core::fea::{MaterialProperties, NodeStress, SafetyZone, StressField, StressTensor};
     use ising_core::graph::{ChangeMetrics, EdgeType, Node, UnifiedGraph};
 
     #[test]
@@ -209,5 +225,101 @@ mod tests {
         assert_eq!(hotspots[0].0, "a");
         // "b" has lower score: (3/10) * (5/20) = 0.075
         assert_eq!(hotspots[1].0, "b");
+    }
+
+    #[test]
+    fn test_store_and_query_stress() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Need nodes first for FK constraint
+        let mut graph = UnifiedGraph::new();
+        graph.add_node(Node::module("a", "a.py"));
+        graph.add_node(Node::module("b", "b.py"));
+        db.store_graph(&graph).unwrap();
+
+        let field = StressField {
+            nodes: vec![
+                NodeStress {
+                    node_id: "a".to_string(),
+                    file_path: "a.py".to_string(),
+                    material: MaterialProperties {
+                        stiffness: 0.8,
+                        yield_strength: 0.5,
+                        fatigue_life: 1.5,
+                        cross_section: 3.0,
+                    },
+                    stress: StressTensor {
+                        change_pressure: 100.0,
+                        tensile: 30.0,
+                        compressive: 40.0,
+                        von_mises: 36.0,
+                    },
+                    safety_factor: 0.014,
+                    safety_zone: SafetyZone::Critical,
+                },
+                NodeStress {
+                    node_id: "b".to_string(),
+                    file_path: "b.py".to_string(),
+                    material: MaterialProperties::default(),
+                    stress: StressTensor::default(),
+                    safety_factor: 10.0,
+                    safety_zone: SafetyZone::OverEngineered,
+                },
+            ],
+            iterations: 5,
+            converged: true,
+        };
+
+        db.store_stress_field(&field).unwrap();
+
+        // Query ranking — "a" should be first (lowest SF)
+        let ranking = db.get_safety_ranking(10).unwrap();
+        assert_eq!(ranking.len(), 2);
+        assert_eq!(ranking[0].node_id, "a");
+        assert!(ranking[0].safety_factor < ranking[1].safety_factor);
+
+        // Query by node
+        let stress_a = db.get_node_stress("a").unwrap().unwrap();
+        assert_eq!(stress_a.safety_zone, "critical");
+        assert!((stress_a.von_mises_stress - 36.0).abs() < 0.01);
+
+        // Query by zone
+        let critical = db.get_nodes_by_zone("critical").unwrap();
+        assert_eq!(critical.len(), 1);
+        assert_eq!(critical[0].node_id, "a");
+    }
+
+    #[test]
+    fn test_load_graph_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+
+        let mut graph = UnifiedGraph::new();
+        graph.add_node(Node::module("a", "a.py"));
+        graph.add_node(Node::module("b", "b.py"));
+        graph.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
+        graph.add_edge("a", "b", EdgeType::CoChanges, 0.7).unwrap();
+        graph.change_metrics.insert(
+            "a".to_string(),
+            ChangeMetrics {
+                change_freq: 20,
+                churn_lines: 100,
+                churn_rate: 5.0,
+                hotspot_score: 0.85,
+                sum_coupling: 0.7,
+                ..Default::default()
+            },
+        );
+        db.store_graph(&graph).unwrap();
+
+        let loaded = db.load_graph().unwrap();
+        assert_eq!(loaded.node_count(), 2);
+        assert_eq!(loaded.edge_count(), 2);
+        assert!(loaded.get_node("a").is_some());
+        assert!(loaded.get_node("b").is_some());
+        assert!(loaded.has_structural_edge("a", "b"));
+
+        let cm = loaded.change_metrics.get("a").unwrap();
+        assert_eq!(cm.change_freq, 20);
+        assert!((cm.churn_rate - 5.0).abs() < f64::EPSILON);
     }
 }
