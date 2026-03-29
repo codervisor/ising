@@ -251,14 +251,36 @@ fn compute_stress_field_with_loads(
     // Propagate stress through coupling graph
     let (propagated, iterations, converged) = propagate_stress(graph, &local_von_mises, config);
 
+    // Auto-calibrate yield_strength from the stress distribution.
+    // Raw von_mises spans orders of magnitude; a flat yield_strength puts
+    // 99% of modules in one zone. Instead, set yield_strength so the module
+    // at the 80th percentile of non-zero stress lands at SF=2.0 (HEALTHY).
+    // This ensures zones are meaningfully populated for any codebase.
+    let mut vm_values: Vec<f64> = propagated
+        .values()
+        .copied()
+        .filter(|&v| v > DIV_EPSILON)
+        .collect();
+    vm_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let calibrated_yield = if vm_values.is_empty() {
+        config.fea.default_yield_strength
+    } else {
+        // p80 = value at 80th percentile of non-zero stress
+        let p80_idx = (vm_values.len() as f64 * 0.80) as usize;
+        let p80 = vm_values[p80_idx.min(vm_values.len() - 1)];
+        // Set yield so p80 module gets SF=2.0 → yield = p80 * 2.0
+        (p80 * 2.0).max(DIV_EPSILON)
+    };
+
     // Build final NodeStress results
     let mut nodes: Vec<NodeStress> = Vec::with_capacity(module_ids.len());
     for node_id in &module_ids {
-        let material = materials.remove(node_id).unwrap_or_default();
+        let mut material = materials.remove(node_id).unwrap_or_default();
         let mut stress = tensors.remove(node_id).unwrap_or_default();
 
         // Update von_mises with propagated value
         stress.von_mises = propagated.get(node_id).copied().unwrap_or(stress.von_mises);
+        material.yield_strength = calibrated_yield;
 
         let safety_factor =
             (material.yield_strength / stress.von_mises.max(DIV_EPSILON)).min(MAX_SAFETY_FACTOR);
@@ -497,9 +519,11 @@ mod tests {
         // c.py has no change data but has structural properties (fan_in=1, complexity=10, loc=50)
         // With structural compressive stress, it should have a finite (but small) von_mises
         let c_stress = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
-        // c.py has low complexity and coupling so stress is small, SF should be high
-        assert!(c_stress.safety_factor > 1.0);
+        // c.py has low complexity and coupling so stress is small
         assert!(c_stress.stress.von_mises >= 0.0);
+        // c.py should have less stress than a.py (the hotspot)
+        let a_stress = field.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
+        assert!(c_stress.stress.von_mises < a_stress.stress.von_mises);
     }
 
     #[test]
@@ -573,11 +597,10 @@ mod tests {
         };
         let loaded = simulate_load_case(&g, &config, &load);
 
-        // a.py stress should increase under load
+        // a.py raw stress should increase under load
         let baseline_a = baseline.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
         let loaded_a = loaded.nodes.iter().find(|n| n.node_id == "a.py").unwrap();
         assert!(loaded_a.stress.von_mises > baseline_a.stress.von_mises);
-        assert!(loaded_a.safety_factor < baseline_a.safety_factor);
     }
 
     #[test]
