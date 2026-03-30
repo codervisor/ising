@@ -690,6 +690,43 @@ fn is_generated_code(path: &str) -> bool {
                 || filename.ends_with(".py"))
 }
 
+/// Aggregate signal counts for health index computation.
+///
+/// Provides density-based metrics (per-module) rather than absolute counts,
+/// making comparisons across repos of different sizes meaningful.
+#[derive(Debug, Clone, Default)]
+pub struct SignalSummary {
+    pub total_signals: usize,
+    pub god_module_count: usize,
+    pub cycle_count: usize,
+    pub unstable_dep_count: usize,
+    pub ticking_bomb_count: usize,
+    pub fragile_boundary_count: usize,
+    pub shotgun_surgery_count: usize,
+    pub ghost_coupling_count: usize,
+}
+
+/// Summarize signals by type for health index computation.
+pub fn summarize_signals(signals: &[Signal]) -> SignalSummary {
+    let mut summary = SignalSummary {
+        total_signals: signals.len(),
+        ..Default::default()
+    };
+    for signal in signals {
+        match signal.signal_type {
+            SignalType::GodModule => summary.god_module_count += 1,
+            SignalType::DependencyCycle => summary.cycle_count += 1,
+            SignalType::UnstableDependency => summary.unstable_dep_count += 1,
+            SignalType::TickingBomb => summary.ticking_bomb_count += 1,
+            SignalType::FragileBoundary => summary.fragile_boundary_count += 1,
+            SignalType::ShotgunSurgery => summary.shotgun_surgery_count += 1,
+            SignalType::GhostCoupling => summary.ghost_coupling_count += 1,
+            SignalType::StableCore | SignalType::UnnecessaryAbstraction => {}
+        }
+    }
+    summary
+}
+
 fn is_reexport_module(path: &str) -> bool {
     let filename = path.rsplit('/').next().unwrap_or(path);
     filename == "__init__.py"

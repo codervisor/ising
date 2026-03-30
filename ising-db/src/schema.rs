@@ -89,7 +89,15 @@ impl Database {
                 critical_count INTEGER,
                 high_count INTEGER,
                 risk_concentration REAL,
-                avg_direct_score REAL
+                avg_direct_score REAL,
+                signal_density REAL DEFAULT 0.0,
+                god_module_density REAL DEFAULT 0.0,
+                cycle_density REAL DEFAULT 0.0,
+                unstable_dep_density REAL DEFAULT 0.0,
+                risk_sub_score REAL DEFAULT 0.0,
+                signal_sub_score REAL DEFAULT 0.0,
+                structural_sub_score REAL DEFAULT 0.0,
+                caveats TEXT DEFAULT '[]'
             );
 
             CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);

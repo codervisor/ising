@@ -4,6 +4,7 @@
 //! Uses influence propagation along both co-change and structural edges.
 
 use ising_core::config::Config;
+use crate::signals::SignalSummary;
 use ising_core::fea::{
     HealthIndex, LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta, RiskField, RiskTier,
     SafetyZone,
@@ -220,8 +221,15 @@ fn propagate_risk(
 }
 
 /// Compute the full risk field for the graph.
-pub fn compute_risk_field(graph: &UnifiedGraph, config: &Config) -> RiskField {
-    compute_risk_field_with_loads(graph, config, &HashMap::new())
+///
+/// If `signal_summary` is provided, it's incorporated into the health index
+/// to produce a signal-aware grade. Without it, only change-risk is used.
+pub fn compute_risk_field(
+    graph: &UnifiedGraph,
+    config: &Config,
+    signal_summary: Option<&SignalSummary>,
+) -> RiskField {
+    compute_risk_field_with_loads(graph, config, &HashMap::new(), signal_summary)
 }
 
 /// Compute risk field with optional per-node pressure multipliers.
@@ -229,6 +237,7 @@ fn compute_risk_field_with_loads(
     graph: &UnifiedGraph,
     config: &Config,
     pressure_multipliers: &HashMap<String, f64>,
+    signal_summary: Option<&SignalSummary>,
 ) -> RiskField {
     let maxes = collect_maxes(graph);
 
@@ -315,7 +324,9 @@ fn compute_risk_field_with_loads(
     assign_risk_tiers(&mut nodes);
 
     // Compute aggregate health index.
-    let health = Some(compute_health_index(&nodes));
+    let default_summary = SignalSummary::default();
+    let summary = signal_summary.unwrap_or(&default_summary);
+    let health = Some(compute_health_index(&nodes, summary));
 
     // Sort by direct_score descending (highest risk first) for the primary ranking.
     // This replaces the old SF-ascending sort which was dominated by propagation.
@@ -344,7 +355,7 @@ pub fn simulate_load_case(
         .iter()
         .map(|lp| (lp.node_id.clone(), lp.pressure))
         .collect();
-    compute_risk_field_with_loads(graph, config, &multipliers)
+    compute_risk_field_with_loads(graph, config, &multipliers, None)
 }
 
 /// Compare two risk fields to produce per-node deltas.
@@ -436,15 +447,31 @@ fn assign_risk_tiers(nodes: &mut [NodeRisk]) {
 
 /// Compute aggregate health index for the repository.
 ///
-/// Like a camera's histogram display: summarizes the overall exposure of the scene
-/// into a single reading. Combines average direct risk with risk concentration
-/// (how localized vs systemic the risk is).
-fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
+/// Combines three independent sub-scores to avoid bias from any single metric:
+///
+/// 1. **Risk sub-score** (weight 0.40): avg direct risk + concentration.
+///    Amplified by 5x to spread the distribution (without this, large repos
+///    always converge to ~1.0 because avg_direct_score → 0 at scale).
+///
+/// 2. **Signal sub-score** (weight 0.35): density of architectural signals
+///    (god modules, ticking bombs, fragile boundaries) per module.
+///    Uses density rather than absolute counts to prevent scale bias.
+///
+/// 3. **Structural sub-score** (weight 0.25): fraction of modules entangled
+///    in dependency cycles or unstable dependency violations.
+///
+/// Bias prevention:
+/// - Density metrics (per-module) instead of absolute counts → scale-invariant
+/// - Sub-score decomposition → transparent what drives the grade
+/// - Caveats emitted when data is insufficient → honest about limitations
+fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIndex {
     let total_modules = nodes.len();
     let active: Vec<&NodeRisk> = nodes.iter().filter(|n| n.change_load > 0.0).collect();
     let active_modules = active.len();
+    let total_f = (total_modules as f64).max(1.0);
 
     if active_modules == 0 {
+        let caveats = vec!["No modules have change history; score reflects structure only".to_string()];
         return HealthIndex {
             score: 1.0,
             grade: "A".to_string(),
@@ -454,6 +481,14 @@ fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
             high_count: 0,
             risk_concentration: 1.0,
             avg_direct_score: 0.0,
+            signal_density: signals.total_signals as f64 / total_f,
+            god_module_density: signals.god_module_count as f64 / total_f,
+            cycle_density: signals.cycle_count as f64 / total_f,
+            unstable_dep_density: signals.unstable_dep_count as f64 / total_f,
+            risk_sub_score: 1.0,
+            signal_sub_score: 1.0,
+            structural_sub_score: 1.0,
+            caveats,
         };
     }
 
@@ -466,13 +501,11 @@ fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
         .filter(|n| n.risk_tier == RiskTier::High)
         .count();
 
-    // Average direct score across active modules
+    // --- Average direct score across active modules ---
     let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
     let avg_direct_score = total_direct / active_modules as f64;
 
-    // Risk concentration: fraction of total risk in the top 10% of modules.
-    // High concentration = risk is localized in a few files (easier to fix).
-    // Low concentration = risk is spread everywhere (systemic problem).
+    // --- Risk concentration ---
     let mut scores: Vec<f64> = active.iter().map(|n| n.direct_score).collect();
     scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let top_10_count = (scores.len() as f64 * 0.10).ceil() as usize;
@@ -483,15 +516,43 @@ fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
         1.0
     };
 
-    // Health score: inversely related to average risk, boosted by concentration.
-    // avg_direct_score of 0 → score = 1.0 (perfectly healthy)
-    // avg_direct_score of 1 → score ≈ 0.5 (average module at capacity)
-    // avg_direct_score of 2+ → score ≈ 0.33 (average module overloaded)
-    let base_health = 1.0 / (1.0 + avg_direct_score);
-    // Concentration bonus: localized risk is better than diffuse risk.
-    // Ranges from 0.9 (diffuse, concentration=0) to 1.1 (concentrated, concentration=1).
-    let concentration_factor = 0.9 + 0.2 * risk_concentration;
-    let score = (base_health * concentration_factor).clamp(0.0, 1.0);
+    // --- Signal densities (per-module) ---
+    let signal_density = signals.total_signals as f64 / total_f;
+    let god_module_density = signals.god_module_count as f64 / total_f;
+    let cycle_density = signals.cycle_count as f64 / total_f;
+    let unstable_dep_density = signals.unstable_dep_count as f64 / total_f;
+
+    // === Sub-score 1: Risk (40%) ===
+    // Amplify avg_direct_score by 5x so the formula discriminates better.
+    // Without amplification: avg=0.03 → 1/(1+0.03) = 0.97 (everything looks great)
+    // With amplification:    avg=0.03 → 1/(1+0.15) = 0.87 (still good, but distinguishable)
+    let base_health = 1.0 / (1.0 + avg_direct_score * 5.0);
+    let concentration_factor = 0.8 + 0.2 * risk_concentration;
+    let risk_sub_score = (base_health * concentration_factor).clamp(0.0, 1.0);
+
+    // === Sub-score 2: Signals (35%) ===
+    // Weight critical signal types more heavily.
+    // god_modules and cycles are the strongest architectural indicators.
+    let weighted_signal_density = god_module_density * 3.0
+        + cycle_density * 4.0
+        + (signals.ticking_bomb_count as f64 / total_f) * 3.0
+        + (signals.fragile_boundary_count as f64 / total_f) * 2.0
+        + (signals.shotgun_surgery_count as f64 / total_f) * 1.5
+        + unstable_dep_density * 2.0
+        + (signals.ghost_coupling_count as f64 / total_f) * 1.0;
+    // Scale factor of 20: at density=0.05 (5%), score = 1/(1+1.0) = 0.50
+    let signal_sub_score = (1.0 / (1.0 + weighted_signal_density * 20.0)).clamp(0.0, 1.0);
+
+    // === Sub-score 3: Structure (25%) ===
+    // What fraction of modules are entangled in cycles or unstable deps?
+    let entanglement_count = signals.cycle_count + signals.unstable_dep_count;
+    let entanglement_ratio = (entanglement_count as f64 / total_f).clamp(0.0, 1.0);
+    let structural_sub_score = 1.0 - entanglement_ratio;
+
+    // === Final composite score ===
+    let score =
+        (risk_sub_score * 0.40 + signal_sub_score * 0.35 + structural_sub_score * 0.25)
+            .clamp(0.0, 1.0);
 
     let grade = if score >= 0.85 {
         "A"
@@ -506,6 +567,26 @@ fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
     }
     .to_string();
 
+    // --- Caveats: flag potential bias or insufficient data ---
+    let mut caveats = Vec::new();
+    if active_modules < total_modules / 20 {
+        caveats.push(format!(
+            "Only {:.1}% of modules have change history; risk scores reflect recent activity only",
+            active_modules as f64 / total_modules as f64 * 100.0
+        ));
+    }
+    if signals.total_signals == 0 && total_modules > 50 {
+        caveats.push(
+            "No architectural signals detected; verify analysis included sufficient git history"
+                .to_string(),
+        );
+    }
+    if signals.ticking_bomb_count == 0 && total_modules > 100 {
+        caveats.push(
+            "No ticking bombs detected; this may indicate missing defect/bug-fix data".to_string(),
+        );
+    }
+
     HealthIndex {
         score,
         grade,
@@ -515,6 +596,14 @@ fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
         high_count,
         risk_concentration,
         avg_direct_score,
+        signal_density,
+        god_module_density,
+        cycle_density,
+        unstable_dep_density,
+        risk_sub_score,
+        signal_sub_score,
+        structural_sub_score,
+        caveats,
     }
 }
 
@@ -644,7 +733,7 @@ mod tests {
     fn test_risk_field_ordering() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config);
+        let field = compute_risk_field(&g, &config, None);
 
         // a.py should have lowest SF (highest risk): most change + most complex
         assert_eq!(field.nodes[0].node_id, "a.py");
@@ -659,7 +748,7 @@ mod tests {
     fn test_no_change_module_safe() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config);
+        let field = compute_risk_field(&g, &config, None);
 
         // c.py has no change data → change_load = 0, risk ≈ propagated only
         let c = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
@@ -673,7 +762,7 @@ mod tests {
     fn test_propagation_converges() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config);
+        let field = compute_risk_field(&g, &config, None);
 
         assert!(field.converged);
         assert!(field.iterations > 0);
@@ -683,7 +772,7 @@ mod tests {
     fn test_propagation_adds_risk() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config);
+        let field = compute_risk_field(&g, &config, None);
 
         // b.py should have propagated risk from a.py (via CoChanges + Imports)
         let b = field.nodes.iter().find(|n| n.node_id == "b.py").unwrap();
@@ -712,7 +801,7 @@ mod tests {
         );
 
         let config = Config::default();
-        let field = compute_risk_field(&g, &config);
+        let field = compute_risk_field(&g, &config, None);
 
         assert!(field.converged);
         assert_eq!(field.nodes.len(), 1);
@@ -726,7 +815,7 @@ mod tests {
         let g = make_test_graph();
         let config = Config::default();
 
-        let baseline = compute_risk_field(&g, &config);
+        let baseline = compute_risk_field(&g, &config, None);
         let load = LoadCase {
             name: "test".to_string(),
             loads: vec![LoadPoint {
@@ -751,7 +840,7 @@ mod tests {
         let g = make_test_graph();
         let config = Config::default();
 
-        let before = compute_risk_field(&g, &config);
+        let before = compute_risk_field(&g, &config, None);
         let load = LoadCase {
             name: "test".to_string(),
             loads: vec![LoadPoint {

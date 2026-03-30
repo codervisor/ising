@@ -379,11 +379,14 @@ impl Database {
 
         // Store health index if present
         if let Some(health) = &field.health {
+            let caveats_json = serde_json::to_string(&health.caveats).unwrap_or_default();
             tx.execute(
                 "INSERT OR REPLACE INTO health_index
                  (id, score, grade, active_modules, total_modules,
-                  critical_count, high_count, risk_concentration, avg_direct_score)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  critical_count, high_count, risk_concentration, avg_direct_score,
+                  signal_density, god_module_density, cycle_density, unstable_dep_density,
+                  risk_sub_score, signal_sub_score, structural_sub_score, caveats)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     health.score,
                     health.grade,
@@ -393,6 +396,14 @@ impl Database {
                     health.high_count,
                     health.risk_concentration,
                     health.avg_direct_score,
+                    health.signal_density,
+                    health.god_module_density,
+                    health.cycle_density,
+                    health.unstable_dep_density,
+                    health.risk_sub_score,
+                    health.signal_sub_score,
+                    health.structural_sub_score,
+                    caveats_json,
                 ],
             )?;
         }
@@ -453,10 +464,15 @@ impl Database {
     pub fn get_health(&self) -> Result<Option<crate::StoredHealth>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT score, grade, active_modules, total_modules,
-                    critical_count, high_count, risk_concentration, avg_direct_score
+                    critical_count, high_count, risk_concentration, avg_direct_score,
+                    signal_density, god_module_density, cycle_density, unstable_dep_density,
+                    risk_sub_score, signal_sub_score, structural_sub_score, caveats
              FROM health_index WHERE id = 1",
         )?;
         let mut rows = stmt.query_map([], |row| {
+            let caveats_str: String = row.get::<_, String>(15).unwrap_or_default();
+            let caveats: Vec<String> =
+                serde_json::from_str(&caveats_str).unwrap_or_default();
             Ok(crate::StoredHealth {
                 score: row.get(0)?,
                 grade: row.get(1)?,
@@ -466,6 +482,14 @@ impl Database {
                 high_count: row.get::<_, i64>(5)? as usize,
                 risk_concentration: row.get(6)?,
                 avg_direct_score: row.get(7)?,
+                signal_density: row.get(8)?,
+                god_module_density: row.get(9)?,
+                cycle_density: row.get(10)?,
+                unstable_dep_density: row.get(11)?,
+                risk_sub_score: row.get(12)?,
+                signal_sub_score: row.get(13)?,
+                structural_sub_score: row.get(14)?,
+                caveats,
             })
         })?;
         match rows.next() {

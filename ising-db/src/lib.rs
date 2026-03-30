@@ -78,6 +78,14 @@ pub struct StoredHealth {
     pub high_count: usize,
     pub risk_concentration: f64,
     pub avg_direct_score: f64,
+    pub signal_density: f64,
+    pub god_module_density: f64,
+    pub cycle_density: f64,
+    pub unstable_dep_density: f64,
+    pub risk_sub_score: f64,
+    pub signal_sub_score: f64,
+    pub structural_sub_score: f64,
+    pub caveats: Vec<String>,
 }
 
 /// Database handle for Ising storage.
