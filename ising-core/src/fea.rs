@@ -18,7 +18,7 @@ pub enum SafetyZone {
     /// SF 2.0–3.0 — good margin.
     Healthy,
     /// SF > 3.0 — low risk, stable module.
-    OverEngineered,
+    Stable,
 }
 
 impl SafetyZone {
@@ -33,7 +33,7 @@ impl SafetyZone {
         } else if sf <= 3.0 {
             SafetyZone::Healthy
         } else {
-            SafetyZone::OverEngineered
+            SafetyZone::Stable
         }
     }
 
@@ -44,7 +44,7 @@ impl SafetyZone {
             SafetyZone::Danger => "DANGER",
             SafetyZone::Warning => "WARNING",
             SafetyZone::Healthy => "HEALTHY",
-            SafetyZone::OverEngineered => "STABLE",
+            SafetyZone::Stable => "STABLE",
         }
     }
 }
@@ -152,15 +152,15 @@ mod tests {
 
     #[test]
     fn test_safety_zone_over_engineered() {
-        assert_eq!(SafetyZone::from_factor(3.01), SafetyZone::OverEngineered);
-        assert_eq!(SafetyZone::from_factor(10.0), SafetyZone::OverEngineered);
+        assert_eq!(SafetyZone::from_factor(3.01), SafetyZone::Stable);
+        assert_eq!(SafetyZone::from_factor(10.0), SafetyZone::Stable);
     }
 
     #[test]
     fn test_safety_zone_display() {
         assert_eq!(format!("{}", SafetyZone::Critical), "CRITICAL");
         assert_eq!(format!("{}", SafetyZone::Healthy), "HEALTHY");
-        assert_eq!(format!("{}", SafetyZone::OverEngineered), "STABLE");
+        assert_eq!(format!("{}", SafetyZone::Stable), "STABLE");
     }
 
     #[test]

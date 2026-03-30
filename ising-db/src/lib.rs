@@ -257,7 +257,7 @@ mod tests {
                     risk_score: 0.0,
                     capacity: 0.9,
                     safety_factor: 10.0,
-                    zone: SafetyZone::OverEngineered,
+                    zone: SafetyZone::Stable,
                 },
             ],
             iterations: 5,
