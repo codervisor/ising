@@ -16,5 +16,6 @@ pub mod fea;
 pub mod graph;
 pub mod ignore;
 pub mod metrics;
+pub mod path_utils;
 
 pub use error::IsingError;

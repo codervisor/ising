@@ -253,6 +253,10 @@ fn detect_unnecessary_abstraction(
         if is_docs_example(a) || is_docs_example(b) {
             continue;
         }
+        // GAP-5: Rust lib.rs/main.rs use `mod` declarations idiomatically
+        if is_rust_entry_point(a) {
+            continue;
+        }
         let pair: (String, String) = if a < b {
             (a.to_string(), b.to_string())
         } else {
@@ -340,10 +344,12 @@ fn detect_stable_cores(node_ids: &[String], graph: &UnifiedGraph, config: &Confi
         let freq = change.map(|m| m.change_freq as f64).unwrap_or(0.0);
         let fan_in = compute_node_metrics(graph, node_id).fan_in as f64;
 
+        // GAP-6: Require minimum absolute fan-in of 5 to avoid noise in large codebases
+        // where the 80th percentile can be as low as 1.
+        let min_fan_in = fan_in_p_high.max(5.0);
         if freq > 0.0
             && freq <= freq_p_low
-            && fan_in >= fan_in_p_high
-            && fan_in_p_high > 0.0
+            && fan_in >= min_fan_in
             && !is_test_file(node_id)
             && !is_docs_example(node_id)
         {
@@ -599,18 +605,7 @@ fn is_test_source_pair(a: &str, b: &str) -> bool {
 }
 
 fn is_test_file(path: &str) -> bool {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    filename.starts_with("test_")
-        || filename.starts_with("tests_")
-        || filename.ends_with("_test.py")
-        || filename.ends_with(".test.ts")
-        || filename.ends_with(".test.js")
-        || filename.ends_with(".spec.ts")
-        || filename.ends_with(".spec.js")
-        || path.contains("/tests/")
-        || path.contains("/test/")
-        || path.starts_with("tests/")
-        || path.starts_with("test/")
+    ising_core::path_utils::is_test_file(path)
 }
 
 /// Check if a path is a source code file (has a recognized source extension).
@@ -621,6 +616,14 @@ fn is_source_file(path: &str) -> bool {
         ".cs", ".swift", ".kt", ".scala",
     ];
     source_extensions.iter().any(|ext| path.ends_with(ext))
+}
+
+/// Check if a path is a Rust entry-point file (lib.rs or main.rs).
+/// These files use `mod` declarations to organize crate structure — flagging
+/// their imports as unnecessary abstraction is a false positive.
+fn is_rust_entry_point(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    filename == "lib.rs" || filename == "main.rs"
 }
 
 /// Check if a path is a documentation example (e.g., docs_src/, examples/).

@@ -225,18 +225,56 @@ impl Database {
         Ok(rows)
     }
 
-    /// Get impact data for a node: its neighbors and related signals.
-    pub fn get_impact(&self, node_id: &str) -> Result<ImpactResult, DbError> {
-        // Get node info
-        let node_exists: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM nodes WHERE id = ?1",
-            params![node_id],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
-
-        if !node_exists {
-            return Ok(ImpactResult::default());
+    /// Resolve a user-provided target string to a node ID.
+    /// Tries: exact node ID match, then file_path match, then prefix match.
+    fn resolve_node_id(&self, target: &str) -> Result<Option<String>, DbError> {
+        // 1. Exact node ID match
+        let exact: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM nodes WHERE id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .ok();
+        if exact.is_some() {
+            return Ok(exact);
         }
+
+        // 2. File path match (return first module node for that file)
+        let by_path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM nodes WHERE file_path = ?1 AND type = 'module' LIMIT 1",
+                params![target],
+                |row| row.get(0),
+            )
+            .ok();
+        if by_path.is_some() {
+            return Ok(by_path);
+        }
+
+        // 3. Prefix match on node ID (e.g. "src/app.py" matches "src/app.py::AppClass")
+        let by_prefix: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM nodes WHERE id LIKE ?1 || '%' AND type = 'module' LIMIT 1",
+                params![target],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(by_prefix)
+    }
+
+    /// Get impact data for a node: its neighbors and related signals.
+    /// Accepts either exact node ID or file path (tries exact match first,
+    /// then file_path match, then prefix match on node ID).
+    pub fn get_impact(&self, target: &str) -> Result<ImpactResult, DbError> {
+        // Resolve target to a node ID: try exact match, then file_path, then prefix
+        let node_id = self.resolve_node_id(target)?;
+        let Some(node_id) = node_id else {
+            return Ok(ImpactResult::default());
+        };
 
         // Structural dependencies (outgoing)
         let mut stmt = self.conn.prepare(
