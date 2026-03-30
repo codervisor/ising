@@ -79,6 +79,9 @@ Cross-layer anomalies detected in `ising-analysis/src/signals.rs`:
 ## Adding a New Language Parser
 
 1. Add grammar dependency to `ising-builders/Cargo.toml`
-2. Create `ising-builders/src/languages/<lang>.rs` implementing the `LanguageParser` trait
+2. Create `ising-builders/src/languages/<lang>.rs` with `extract_nodes()` function
 3. Register it in `ising-builders/src/languages/mod.rs`
-4. Add file extension mapping in `ising-builders/src/structural.rs`
+4. Add `Language` variant and extension mapping in `ising-builders/src/common.rs`
+5. Add tree-sitter dispatch in `ising-builders/src/structural.rs` (both `get_tree_sitter_language` and extract match)
+
+**Supported languages**: Python, TypeScript, JavaScript, Rust, Go, Vue, Java, C#

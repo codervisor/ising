@@ -239,6 +239,26 @@ fn analyze_file(
                             &mut imports,
                         );
                     }
+                    Language::Java => {
+                        languages::java::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::CSharp => {
+                        languages::csharp::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
                     Language::Vue => unreachable!(), // Handled above
                 }
             }
@@ -283,6 +303,8 @@ fn get_tree_sitter_language(lang: Language, file_path: &Path) -> Option<tree_sit
         }
         Language::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
         Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
+        Language::Java => Some(tree_sitter_java::LANGUAGE.into()),
+        Language::CSharp => Some(tree_sitter_c_sharp::LANGUAGE.into()),
         Language::Vue => None, // Vue uses its own two-pass parsing
     }
 }
