@@ -476,11 +476,12 @@ fn cmd_export(args: ExportArgs) -> Result<i32> {
 fn cmd_safety(args: SafetyArgs) -> Result<i32> {
     let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
 
-    let results = if let Some(zone) = &args.zone {
+    let mut results = if let Some(zone) = &args.zone {
         db.get_nodes_by_zone(zone)?
     } else {
         db.get_safety_ranking(args.top)?
     };
+    results.truncate(args.top);
 
     if results.is_empty() {
         eprintln!("No risk data found. Run `ising build` first.");
@@ -554,7 +555,7 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
             println!("{}", "═".repeat(86));
             println!(
                 "  {:<40} {:>7} {:>7} {:>6} {:>6} {:>12}",
-                "File", "Risk↑", "Risk↓", "SF↑", "SF↓", "Zone→"
+                "File", "Risk(b)", "Risk(a)", "SF(b)", "SF(a)", "Zone→"
             );
             println!("{}", "─".repeat(86));
 
@@ -591,12 +592,19 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
     Ok(0)
 }
 
-/// Truncate a path string to fit in a column width.
+/// Truncate a path string to fit in a column width (Unicode-safe).
 fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
+    let char_count = path.chars().count();
+    if char_count <= max_len {
         path.to_string()
     } else {
-        format!("…{}", &path[path.len() - max_len + 1..])
+        let keep = max_len.saturating_sub(1);
+        if keep == 0 {
+            return "\u{2026}".to_string();
+        }
+        let start = char_count - keep;
+        let byte_offset = path.char_indices().nth(start).map(|(i, _)| i).unwrap();
+        format!("\u{2026}{}", &path[byte_offset..])
     }
 }
 

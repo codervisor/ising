@@ -229,7 +229,7 @@ mod tests {
     fn test_store_and_query_risk() {
         let db = Database::open_in_memory().unwrap();
 
-        // Need nodes first for FK constraint
+        // Insert nodes first (risk_data references nodes via FK)
         let mut graph = UnifiedGraph::new();
         graph.add_node(Node::module("a", "a.py"));
         graph.add_node(Node::module("b", "b.py"));

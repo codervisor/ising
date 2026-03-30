@@ -153,12 +153,14 @@ async fn safety_handler(
         .db
         .lock()
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let results = if let Some(zone) = &query.zone {
+    let limit = query.top.unwrap_or(20);
+    let mut results = if let Some(zone) = &query.zone {
         db.get_nodes_by_zone(zone)
     } else {
-        db.get_safety_ranking(query.top.unwrap_or(20))
+        db.get_safety_ranking(limit)
     }
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    results.truncate(limit);
     let json = serde_json::to_value(&results)
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json))
@@ -168,14 +170,14 @@ async fn simulate_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SimulateQuery>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let graph = db
-        .load_graph()
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let graph = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        db.load_graph()
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    };
 
     let config = ising_core::config::Config::default();
     let load_case = ising_analysis::stress::single_file_change(&graph, &query.target);

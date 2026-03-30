@@ -162,14 +162,15 @@ fn propagate_risk(
     let max_iter = config.fea.max_iterations;
     let raw_neighbors = build_adjacency(graph, config);
 
-    // Normalize weights per node so incoming influence sums to at most 1.0.
-    // This guarantees the iteration contracts and converges.
+    // Normalize weights per node so incoming influence sums to at most MAX_SPECTRAL_RADIUS.
+    // Keeping the spectral radius strictly < 1 ensures the Jacobi iteration contracts.
+    const MAX_SPECTRAL_RADIUS: f64 = 0.95;
     let neighbors: HashMap<&str, Vec<(&str, f64)>> = raw_neighbors
         .into_iter()
         .map(|(node, nbrs)| {
             let total_weight: f64 = nbrs.iter().map(|&(_, w)| w).sum();
-            if total_weight > 1.0 {
-                let scale = 1.0 / total_weight;
+            if total_weight > MAX_SPECTRAL_RADIUS {
+                let scale = MAX_SPECTRAL_RADIUS / total_weight;
                 let normalized: Vec<(&str, f64)> =
                     nbrs.into_iter().map(|(n, w)| (n, w * scale)).collect();
                 (node, normalized)
