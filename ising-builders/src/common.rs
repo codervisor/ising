@@ -14,6 +14,8 @@ pub enum Language {
     Rust,
     Go,
     Vue,
+    Java,
+    CSharp,
 }
 
 impl Language {
@@ -26,6 +28,8 @@ impl Language {
             "rs" => Some(Language::Rust),
             "go" => Some(Language::Go),
             "vue" => Some(Language::Vue),
+            "java" => Some(Language::Java),
+            "cs" | "csx" => Some(Language::CSharp),
             _ => None,
         }
     }
@@ -52,12 +56,16 @@ impl Language {
             Language::Rust => "rust",
             Language::Go => "go",
             Language::Vue => "vue",
+            Language::Java => "java",
+            Language::CSharp => "csharp",
         }
     }
 
     /// All supported file extensions.
     pub fn supported_extensions() -> &'static [&'static str] {
-        &["py", "ts", "tsx", "js", "jsx", "rs", "go", "vue"]
+        &[
+            "py", "ts", "tsx", "js", "jsx", "rs", "go", "vue", "java", "cs", "csx",
+        ]
     }
 }
 
@@ -72,6 +80,8 @@ mod tests {
         assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
         assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
         assert_eq!(Language::from_extension("vue"), Some(Language::Vue));
+        assert_eq!(Language::from_extension("java"), Some(Language::Java));
+        assert_eq!(Language::from_extension("cs"), Some(Language::CSharp));
         assert_eq!(Language::from_extension("md"), None);
     }
 
