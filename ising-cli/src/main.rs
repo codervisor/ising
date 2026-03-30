@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ising_analysis::signals::detect_signals;
 use ising_analysis::stress;
 use ising_core::config::Config;
-use ising_core::fea::{LoadCase, SafetyZone};
+use ising_core::fea::{LoadCase, RiskTier};
 use ising_core::metrics::compute_graph_metrics;
 use ising_core::path_utils::is_test_file;
 use ising_db::Database;
@@ -34,6 +34,8 @@ enum Commands {
     Export(ExportArgs),
     /// Show safety factor analysis for all modules
     Safety(SafetyArgs),
+    /// Show aggregate repository health index
+    Health(HealthArgs),
     /// Simulate a load case and show risk impact
     Simulate(SimulateArgs),
     /// Start the MCP server for AI agent integration
@@ -146,6 +148,16 @@ struct SafetyArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct HealthArgs {
+    /// Database file path
+    #[arg(long, default_value = "ising.db")]
+    db: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
+#[derive(clap::Args, Debug)]
 struct SimulateArgs {
     /// File path or load-case JSON file
     target: String,
@@ -208,6 +220,7 @@ fn run(cli: Cli) -> Result<i32> {
         Commands::Stats(args) => cmd_stats(args),
         Commands::Export(args) => cmd_export(args),
         Commands::Safety(args) => cmd_safety(args),
+        Commands::Health(args) => cmd_health(args),
         Commands::Simulate(args) => cmd_simulate(args),
         Commands::Serve(args) => cmd_serve(args),
     }
@@ -258,12 +271,12 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     let critical_count = risk_field
         .nodes
         .iter()
-        .filter(|n| n.zone == SafetyZone::Critical)
+        .filter(|n| n.risk_tier == RiskTier::Critical)
         .count();
-    let danger_count = risk_field
+    let high_count = risk_field
         .nodes
         .iter()
-        .filter(|n| n.zone == SafetyZone::Danger)
+        .filter(|n| n.risk_tier == RiskTier::High)
         .count();
 
     // Store build metadata
@@ -285,13 +298,19 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     eprintln!("  Defect edges:     {}", metrics.defect_edges);
     eprintln!("  Cycles:           {}", metrics.cycle_count);
     eprintln!("  Signals:          {}", signals.len());
+    let health_grade = risk_field
+        .health
+        .as_ref()
+        .map(|h| format!(" health={}", h.grade))
+        .unwrap_or_default();
     eprintln!(
-        "  Risk analysis:    {} modules ({} critical, {} danger, converged={} in {} iter)",
+        "  Risk analysis:    {} modules ({} critical, {} high, converged={} in {} iter){}",
         risk_field.nodes.len(),
         critical_count,
-        danger_count,
+        high_count,
         risk_field.converged,
         risk_field.iterations,
+        health_grade,
     );
 
     if metrics.cochange_coverage < 0.10 && metrics.total_nodes > 50 {
@@ -522,17 +541,17 @@ fn cmd_safety(args: SafetyArgs) -> Result<i32> {
         }
         OutputFormat::Text => {
             let title = if let Some(zone) = &args.zone {
-                format!("Safety Analysis — zone: {zone}")
+                format!("Risk Analysis — filter: {zone}")
             } else {
-                format!("Safety Analysis — top {}", args.top)
+                format!("Risk Analysis — top {}", args.top)
             };
             println!("{title}");
-            println!("{}", "═".repeat(80));
+            println!("{}", "═".repeat(86));
             println!(
-                "  {:>4}  {:<45} {:>6} {:>5} {:>6} {:>10}",
-                "Rank", "File", "Risk", "Cap", "SF", "Zone"
+                "  {:>4}  {:<45} {:>7} {:>5} {:>5} {:>10}",
+                "Rank", "File", "Direct", "Cap", "P%", "Tier"
             );
-            println!("{}", "─".repeat(80));
+            println!("{}", "─".repeat(86));
             for (i, s) in results.iter().enumerate() {
                 let test_tag = if is_test_file(&s.node_id) {
                     " [TEST]"
@@ -540,15 +559,64 @@ fn cmd_safety(args: SafetyArgs) -> Result<i32> {
                     ""
                 };
                 println!(
-                    "  {:>4}  {:<45} {:>6.2} {:>5.2} {:>6.2} {:>10}{}",
+                    "  {:>4}  {:<45} {:>7.2} {:>5.2} {:>5.1} {:>10}{}",
                     i + 1,
                     truncate_path(&s.node_id, 45),
-                    s.risk_score,
+                    s.direct_score,
                     s.capacity,
-                    s.safety_factor,
-                    s.zone.to_uppercase(),
+                    s.percentile,
+                    s.risk_tier.to_uppercase(),
                     test_tag,
                 );
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+fn cmd_health(args: HealthArgs) -> Result<i32> {
+    let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
+
+    let health = match db.get_health()? {
+        Some(h) => h,
+        None => {
+            eprintln!("No health data found. Run `ising build` first.");
+            return Ok(1);
+        }
+    };
+
+    match args.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&health)?);
+        }
+        OutputFormat::Text => {
+            println!("Repository Health");
+            println!("{}", "═".repeat(50));
+            println!(
+                "  Grade:              {} ({:.0}%)",
+                health.grade,
+                health.score * 100.0
+            );
+            println!(
+                "  Active modules:     {} / {}",
+                health.active_modules, health.total_modules
+            );
+            println!("  Critical (top 1%):  {}", health.critical_count);
+            println!("  High (top 5%):      {}", health.high_count);
+            println!(
+                "  Risk concentration: {:.0}%",
+                health.risk_concentration * 100.0
+            );
+            println!("  Avg direct score:   {:.3}", health.avg_direct_score);
+            println!();
+            if health.risk_concentration > 0.7 {
+                println!(
+                    "  Risk is concentrated in {} hot modules — targeted refactoring will help.",
+                    health.critical_count + health.high_count
+                );
+            } else {
+                println!("  Risk is diffuse across the codebase — systemic improvement needed.");
             }
         }
     }
@@ -760,5 +828,17 @@ mod tests {
     fn simulate_command_parses() {
         let cli = Cli::try_parse_from(["ising", "simulate", "src/main.rs"]).unwrap();
         assert!(matches!(cli.command, Commands::Simulate(_)));
+    }
+
+    #[test]
+    fn health_command_parses() {
+        let cli = Cli::try_parse_from(["ising", "health"]).unwrap();
+        assert!(matches!(cli.command, Commands::Health(_)));
+    }
+
+    #[test]
+    fn health_command_json_parses() {
+        let cli = Cli::try_parse_from(["ising", "health", "--format", "json"]).unwrap();
+        assert!(matches!(cli.command, Commands::Health(_)));
     }
 }

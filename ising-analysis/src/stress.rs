@@ -5,7 +5,8 @@
 
 use ising_core::config::Config;
 use ising_core::fea::{
-    LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta, RiskField, SafetyZone,
+    HealthIndex, LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta, RiskField, RiskTier,
+    SafetyZone,
 };
 use ising_core::graph::{EdgeType, NodeType, UnifiedGraph};
 use ising_core::metrics::{compute_node_metrics, normalize};
@@ -284,6 +285,10 @@ fn compute_risk_field_with_loads(
         let safety_factor = (capacity / total_risk.max(DIV_EPSILON)).min(MAX_SAFETY_FACTOR);
         let zone = SafetyZone::from_factor(safety_factor);
 
+        // Direct score: local risk without propagation. This is the basis for
+        // auto-calibrated tier classification.
+        let direct_score = change_load / capacity.max(DIV_EPSILON);
+
         let file_path = graph
             .get_node(node_id)
             .map(|n| n.file_path.clone())
@@ -299,13 +304,24 @@ fn compute_risk_field_with_loads(
             capacity,
             safety_factor,
             zone,
+            direct_score,
+            risk_tier: RiskTier::Normal, // assigned below
+            percentile: 0.0,             // assigned below
         });
     }
 
-    // Sort by safety factor ascending (most critical first)
+    // Auto-calibrate: assign risk tiers based on percentile of direct_score.
+    // This is the "auto-exposure" step — thresholds derive from the data, not constants.
+    assign_risk_tiers(&mut nodes);
+
+    // Compute aggregate health index.
+    let health = Some(compute_health_index(&nodes));
+
+    // Sort by direct_score descending (highest risk first) for the primary ranking.
+    // This replaces the old SF-ascending sort which was dominated by propagation.
     nodes.sort_by(|a, b| {
-        a.safety_factor
-            .partial_cmp(&b.safety_factor)
+        b.direct_score
+            .partial_cmp(&a.direct_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -313,6 +329,7 @@ fn compute_risk_field_with_loads(
         nodes,
         iterations,
         converged,
+        health,
     }
 }
 
@@ -365,6 +382,140 @@ pub fn compare_risk_fields(before: &RiskField, after: &RiskField) -> RiskDelta {
     });
 
     RiskDelta { deltas }
+}
+
+/// Assign auto-calibrated risk tiers based on percentile of direct_score.
+///
+/// Like auto-exposure in a camera: instead of fixed thresholds, we measure the
+/// distribution and set tiers relative to it. Top 1% = Critical, top 5% = High,
+/// top 15% = Medium, rest = Normal.
+///
+/// Only modules with change_load > 0 (i.e., actually changed in the time window)
+/// are eligible for Critical/High tiers. Unchanged modules are always Normal.
+fn assign_risk_tiers(nodes: &mut [NodeRisk]) {
+    if nodes.is_empty() {
+        return;
+    }
+
+    // Collect direct scores of active modules (those with actual changes)
+    let mut active_scores: Vec<(usize, f64)> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.change_load > 0.0)
+        .map(|(i, n)| (i, n.direct_score))
+        .collect();
+
+    // Sort descending by direct score
+    active_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = active_scores.len();
+    if n == 0 {
+        return;
+    }
+
+    // Assign tiers based on rank position among active modules
+    let critical_cutoff = (n as f64 * 0.01).ceil() as usize; // top 1%
+    let high_cutoff = (n as f64 * 0.05).ceil() as usize; // top 5%
+    let medium_cutoff = (n as f64 * 0.15).ceil() as usize; // top 15%
+
+    for (rank, &(node_idx, _score)) in active_scores.iter().enumerate() {
+        let tier = if rank < critical_cutoff {
+            RiskTier::Critical
+        } else if rank < high_cutoff {
+            RiskTier::High
+        } else if rank < medium_cutoff {
+            RiskTier::Medium
+        } else {
+            RiskTier::Normal
+        };
+        let percentile = 100.0 * (1.0 - rank as f64 / n as f64);
+        nodes[node_idx].risk_tier = tier;
+        nodes[node_idx].percentile = percentile;
+    }
+}
+
+/// Compute aggregate health index for the repository.
+///
+/// Like a camera's histogram display: summarizes the overall exposure of the scene
+/// into a single reading. Combines average direct risk with risk concentration
+/// (how localized vs systemic the risk is).
+fn compute_health_index(nodes: &[NodeRisk]) -> HealthIndex {
+    let total_modules = nodes.len();
+    let active: Vec<&NodeRisk> = nodes.iter().filter(|n| n.change_load > 0.0).collect();
+    let active_modules = active.len();
+
+    if active_modules == 0 {
+        return HealthIndex {
+            score: 1.0,
+            grade: "A".to_string(),
+            active_modules: 0,
+            total_modules,
+            critical_count: 0,
+            high_count: 0,
+            risk_concentration: 1.0,
+            avg_direct_score: 0.0,
+        };
+    }
+
+    let critical_count = nodes
+        .iter()
+        .filter(|n| n.risk_tier == RiskTier::Critical)
+        .count();
+    let high_count = nodes
+        .iter()
+        .filter(|n| n.risk_tier == RiskTier::High)
+        .count();
+
+    // Average direct score across active modules
+    let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
+    let avg_direct_score = total_direct / active_modules as f64;
+
+    // Risk concentration: fraction of total risk in the top 10% of modules.
+    // High concentration = risk is localized in a few files (easier to fix).
+    // Low concentration = risk is spread everywhere (systemic problem).
+    let mut scores: Vec<f64> = active.iter().map(|n| n.direct_score).collect();
+    scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let top_10_count = (scores.len() as f64 * 0.10).ceil() as usize;
+    let top_10_sum: f64 = scores.iter().take(top_10_count).sum();
+    let risk_concentration = if total_direct > 0.0 {
+        top_10_sum / total_direct
+    } else {
+        1.0
+    };
+
+    // Health score: inversely related to average risk, boosted by concentration.
+    // avg_direct_score of 0 → score = 1.0 (perfectly healthy)
+    // avg_direct_score of 1 → score ≈ 0.5 (average module at capacity)
+    // avg_direct_score of 2+ → score ≈ 0.33 (average module overloaded)
+    let base_health = 1.0 / (1.0 + avg_direct_score);
+    // Concentration bonus: localized risk is better than diffuse risk.
+    // Ranges from 0.9 (diffuse, concentration=0) to 1.1 (concentrated, concentration=1).
+    let concentration_factor = 0.9 + 0.2 * risk_concentration;
+    let score = (base_health * concentration_factor).clamp(0.0, 1.0);
+
+    let grade = if score >= 0.85 {
+        "A"
+    } else if score >= 0.70 {
+        "B"
+    } else if score >= 0.55 {
+        "C"
+    } else if score >= 0.40 {
+        "D"
+    } else {
+        "F"
+    }
+    .to_string();
+
+    HealthIndex {
+        score,
+        grade,
+        active_modules,
+        total_modules,
+        critical_count,
+        high_count,
+        risk_concentration,
+        avg_direct_score,
+    }
 }
 
 /// Generate a load case for a single-file change scenario.

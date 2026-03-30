@@ -1,7 +1,7 @@
 //! Risk analysis types for codebase structural assessment.
 //!
 //! Defines risk scores, capacity, safety factors, load cases, and risk fields.
-//! Replaces the earlier FEA-themed types with honest, direct metrics.
+//! Uses auto-calibrated percentile-based risk tiers alongside legacy safety zones.
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +55,43 @@ impl std::fmt::Display for SafetyZone {
     }
 }
 
+/// Auto-calibrated risk tier based on percentile of direct risk score.
+///
+/// Unlike SafetyZone (which uses hard-coded thresholds that over-classify in dense graphs),
+/// RiskTier is derived from the distribution of `direct_score = change_load / capacity`
+/// within each specific graph. This makes it self-calibrating across languages, architectures,
+/// and graph densities — like auto-exposure in a camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskTier {
+    /// Top 1% by direct risk — immediate attention needed.
+    Critical,
+    /// Top 1–5% — elevated risk, monitor closely.
+    High,
+    /// Top 5–15% — moderate risk.
+    Medium,
+    /// Bottom 85% — normal.
+    Normal,
+}
+
+impl RiskTier {
+    /// Human-readable label for display.
+    pub fn label(&self) -> &'static str {
+        match self {
+            RiskTier::Critical => "CRITICAL",
+            RiskTier::High => "HIGH",
+            RiskTier::Medium => "MEDIUM",
+            RiskTier::Normal => "NORMAL",
+        }
+    }
+}
+
+impl std::fmt::Display for RiskTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
 /// Risk assessment for a single code module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRisk {
@@ -72,8 +109,23 @@ pub struct NodeRisk {
     pub capacity: f64,
     /// capacity / risk_score. High = safe, low = danger.
     pub safety_factor: f64,
-    /// Classification zone.
+    /// Legacy classification zone (hard-coded thresholds).
     pub zone: SafetyZone,
+    /// Direct risk: change_load / capacity. Measures local risk without propagation.
+    #[serde(default)]
+    pub direct_score: f64,
+    /// Auto-calibrated risk tier based on percentile of direct_score.
+    #[serde(default)]
+    pub risk_tier: RiskTier,
+    /// Percentile rank within the graph (100 = highest risk, 0 = lowest).
+    #[serde(default)]
+    pub percentile: f64,
+}
+
+impl Default for RiskTier {
+    fn default() -> Self {
+        RiskTier::Normal
+    }
 }
 
 /// A complete risk field across the graph.
@@ -84,6 +136,34 @@ pub struct RiskField {
     pub iterations: usize,
     /// Whether propagation converged within max_iterations.
     pub converged: bool,
+    /// Aggregate health index for the repository.
+    #[serde(default)]
+    pub health: Option<HealthIndex>,
+}
+
+/// Aggregate health index for a repository.
+///
+/// A single-number summary derived from the distribution of direct risk scores
+/// and their concentration. Analogous to a camera's exposure meter reading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthIndex {
+    /// Overall health score [0.0, 1.0]. Higher = healthier.
+    pub score: f64,
+    /// Human-readable grade (A/B/C/D/F).
+    pub grade: String,
+    /// Number of modules actively changed in the time window.
+    pub active_modules: usize,
+    /// Total modules in the graph.
+    pub total_modules: usize,
+    /// Number of modules in the critical tier (top 1%).
+    pub critical_count: usize,
+    /// Number of modules in the high tier (top 1-5%).
+    pub high_count: usize,
+    /// Concentration: what fraction of total risk is in the top 10% of modules.
+    /// High concentration (>0.8) = risk is localized (good). Low (<0.5) = systemic (bad).
+    pub risk_concentration: f64,
+    /// Average direct score across active modules.
+    pub avg_direct_score: f64,
 }
 
 /// A single load point in a load case.
@@ -175,10 +255,28 @@ mod tests {
             capacity: 0.3,
             safety_factor: 0.33,
             zone: SafetyZone::Critical,
+            direct_score: 2.67,
+            risk_tier: RiskTier::Critical,
+            percentile: 99.5,
         };
         let json = serde_json::to_string(&nr).unwrap();
         let restored: NodeRisk = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.node_id, "test.py");
         assert_eq!(restored.zone, SafetyZone::Critical);
+        assert_eq!(restored.risk_tier, RiskTier::Critical);
+        assert!((restored.direct_score - 2.67).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_risk_tier_display() {
+        assert_eq!(format!("{}", RiskTier::Critical), "CRITICAL");
+        assert_eq!(format!("{}", RiskTier::High), "HIGH");
+        assert_eq!(format!("{}", RiskTier::Medium), "MEDIUM");
+        assert_eq!(format!("{}", RiskTier::Normal), "NORMAL");
+    }
+
+    #[test]
+    fn test_risk_tier_default() {
+        assert_eq!(RiskTier::default(), RiskTier::Normal);
     }
 }
