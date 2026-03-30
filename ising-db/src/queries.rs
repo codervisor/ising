@@ -348,14 +348,19 @@ impl Database {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO risk_data
                  (node_id, change_load, structural_weight, propagated_risk,
-                  risk_score, capacity, safety_factor, zone)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  risk_score, capacity, safety_factor, zone,
+                  direct_score, risk_tier, percentile)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for nr in &field.nodes {
                 let zone_str = serde_json::to_value(nr.zone)
                     .ok()
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
                     .unwrap_or_else(|| "unknown".to_string());
+                let tier_str = serde_json::to_value(nr.risk_tier)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "normal".to_string());
                 stmt.execute(params![
                     nr.node_id,
                     nr.change_load,
@@ -365,20 +370,45 @@ impl Database {
                     nr.capacity,
                     nr.safety_factor,
                     zone_str,
+                    nr.direct_score,
+                    tier_str,
+                    nr.percentile,
                 ])?;
             }
         }
+
+        // Store health index if present
+        if let Some(health) = &field.health {
+            tx.execute(
+                "INSERT OR REPLACE INTO health_index
+                 (id, score, grade, active_modules, total_modules,
+                  critical_count, high_count, risk_concentration, avg_direct_score)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    health.score,
+                    health.grade,
+                    health.active_modules,
+                    health.total_modules,
+                    health.critical_count,
+                    health.high_count,
+                    health.risk_concentration,
+                    health.avg_direct_score,
+                ],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 
-    /// Query safety factors ranked by most critical first.
+    /// Query risk data ranked by direct score (highest risk first).
     pub fn get_safety_ranking(&self, top_n: usize) -> Result<Vec<StoredRisk>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, change_load, structural_weight, propagated_risk,
-                    risk_score, capacity, safety_factor, zone
+                    risk_score, capacity, safety_factor, zone,
+                    direct_score, risk_tier, percentile
              FROM risk_data
-             ORDER BY safety_factor ASC
+             ORDER BY direct_score DESC
              LIMIT ?1",
         )?;
         let rows = stmt
@@ -391,7 +421,8 @@ impl Database {
     pub fn get_node_risk(&self, node_id: &str) -> Result<Option<StoredRisk>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT node_id, change_load, structural_weight, propagated_risk,
-                    risk_score, capacity, safety_factor, zone
+                    risk_score, capacity, safety_factor, zone,
+                    direct_score, risk_tier, percentile
              FROM risk_data WHERE node_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![node_id], map_risk_row)?;
@@ -402,18 +433,46 @@ impl Database {
         }
     }
 
-    /// Query nodes by safety zone.
+    /// Query nodes by safety zone (legacy) or risk tier.
     pub fn get_nodes_by_zone(&self, zone: &str) -> Result<Vec<StoredRisk>, DbError> {
+        // Support both legacy zone names and new tier names
         let mut stmt = self.conn.prepare(
             "SELECT node_id, change_load, structural_weight, propagated_risk,
-                    risk_score, capacity, safety_factor, zone
-             FROM risk_data WHERE zone = ?1
-             ORDER BY safety_factor ASC",
+                    risk_score, capacity, safety_factor, zone,
+                    direct_score, risk_tier, percentile
+             FROM risk_data WHERE zone = ?1 OR risk_tier = ?1
+             ORDER BY direct_score DESC",
         )?;
         let rows = stmt
             .query_map(params![zone], map_risk_row)?
             .collect::<SqlResult<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Query the stored health index.
+    pub fn get_health(&self) -> Result<Option<crate::StoredHealth>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT score, grade, active_modules, total_modules,
+                    critical_count, high_count, risk_concentration, avg_direct_score
+             FROM health_index WHERE id = 1",
+        )?;
+        let mut rows = stmt.query_map([], |row| {
+            Ok(crate::StoredHealth {
+                score: row.get(0)?,
+                grade: row.get(1)?,
+                active_modules: row.get::<_, i64>(2)? as usize,
+                total_modules: row.get::<_, i64>(3)? as usize,
+                critical_count: row.get::<_, i64>(4)? as usize,
+                high_count: row.get::<_, i64>(5)? as usize,
+                risk_concentration: row.get(6)?,
+                avg_direct_score: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(h)) => Ok(Some(h)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
     }
 
     /// Reconstruct a UnifiedGraph from the database.
@@ -575,6 +634,9 @@ fn map_risk_row(row: &rusqlite::Row<'_>) -> SqlResult<StoredRisk> {
         capacity: row.get(5)?,
         safety_factor: row.get(6)?,
         zone: row.get(7)?,
+        direct_score: row.get(8)?,
+        risk_tier: row.get(9)?,
+        percentile: row.get(10)?,
     })
 }
 

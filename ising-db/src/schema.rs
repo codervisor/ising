@@ -74,7 +74,22 @@ impl Database {
                 capacity REAL,
                 safety_factor REAL,
                 zone TEXT,
+                direct_score REAL DEFAULT 0.0,
+                risk_tier TEXT DEFAULT 'normal',
+                percentile REAL DEFAULT 0.0,
                 FOREIGN KEY (node_id) REFERENCES nodes(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS health_index (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                score REAL,
+                grade TEXT,
+                active_modules INTEGER,
+                total_modules INTEGER,
+                critical_count INTEGER,
+                high_count INTEGER,
+                risk_concentration REAL,
+                avg_direct_score REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
@@ -83,6 +98,8 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_signals_type ON signals(signal_type);
             CREATE INDEX IF NOT EXISTS idx_signals_severity ON signals(severity DESC);
             CREATE INDEX IF NOT EXISTS idx_risk_safety ON risk_data(safety_factor ASC);
+            CREATE INDEX IF NOT EXISTS idx_risk_direct ON risk_data(direct_score DESC);
+            CREATE INDEX IF NOT EXISTS idx_risk_tier ON risk_data(risk_tier);
 
             -- Migration: drop old stress_data table from previous schema
             DROP TABLE IF EXISTS stress_data;
@@ -96,6 +113,7 @@ impl Database {
         self.conn.execute_batch(
             "
             DELETE FROM risk_data;
+            DELETE FROM health_index;
             DELETE FROM signals;
             DELETE FROM change_metrics;
             DELETE FROM defect_metrics;

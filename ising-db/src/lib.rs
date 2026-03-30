@@ -62,6 +62,22 @@ pub struct StoredRisk {
     pub capacity: f64,
     pub safety_factor: f64,
     pub zone: String,
+    pub direct_score: f64,
+    pub risk_tier: String,
+    pub percentile: f64,
+}
+
+/// Stored health index for the repository.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StoredHealth {
+    pub score: f64,
+    pub grade: String,
+    pub active_modules: usize,
+    pub total_modules: usize,
+    pub critical_count: usize,
+    pub high_count: usize,
+    pub risk_concentration: f64,
+    pub avg_direct_score: f64,
 }
 
 /// Database handle for Ising storage.
@@ -90,7 +106,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ising_core::fea::{NodeRisk, RiskField, SafetyZone};
+    use ising_core::fea::{NodeRisk, RiskField, RiskTier, SafetyZone};
     use ising_core::graph::{ChangeMetrics, EdgeType, Node, UnifiedGraph};
 
     #[test]
@@ -247,6 +263,9 @@ mod tests {
                     capacity: 0.3,
                     safety_factor: 0.3,
                     zone: SafetyZone::Critical,
+                    direct_score: 3.0,
+                    risk_tier: RiskTier::Critical,
+                    percentile: 100.0,
                 },
                 NodeRisk {
                     node_id: "b".to_string(),
@@ -258,19 +277,23 @@ mod tests {
                     capacity: 0.9,
                     safety_factor: 10.0,
                     zone: SafetyZone::Stable,
+                    direct_score: 0.0,
+                    risk_tier: RiskTier::Normal,
+                    percentile: 0.0,
                 },
             ],
             iterations: 5,
             converged: true,
+            health: None,
         };
 
         db.store_risk_field(&field).unwrap();
 
-        // Query ranking — "a" should be first (lowest SF)
+        // Query ranking — "a" should be first (highest direct_score)
         let ranking = db.get_safety_ranking(10).unwrap();
         assert_eq!(ranking.len(), 2);
         assert_eq!(ranking[0].node_id, "a");
-        assert!(ranking[0].safety_factor < ranking[1].safety_factor);
+        assert!(ranking[0].direct_score > ranking[1].direct_score);
 
         // Query by node
         let risk_a = db.get_node_risk("a").unwrap().unwrap();
