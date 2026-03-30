@@ -31,6 +31,8 @@ pub enum SignalType {
     ShotgunSurgery,
     /// Stable module depends on unstable module — Stable Dependencies Principle violation.
     UnstableDependency,
+    /// Median/P75 complexity is high across the codebase — distributed complexity risk.
+    SystemicComplexity,
 }
 
 impl SignalType {
@@ -42,7 +44,8 @@ impl SignalType {
             SignalType::GhostCoupling
             | SignalType::GodModule
             | SignalType::ShotgunSurgery
-            | SignalType::UnstableDependency => "high",
+            | SignalType::UnstableDependency
+            | SignalType::SystemicComplexity => "high",
             SignalType::StableCore => "guard",
             SignalType::UnnecessaryAbstraction => "info",
         }
@@ -110,6 +113,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         graph,
         &config.thresholds,
     ));
+    signals.extend(detect_systemic_complexity(&node_ids, graph));
 
     signals.sort_by(|a, b| {
         b.severity
@@ -255,6 +259,12 @@ fn detect_unnecessary_abstraction(
         }
         // GAP-5: Rust lib.rs/main.rs use `mod` declarations idiomatically
         if is_rust_entry_point(a) {
+            continue;
+        }
+        // GAP-13: Go package-level imports create edges to every file in the
+        // target package. Two .go files in the same package are siblings, not
+        // abstraction layers — skip intra-package pairs.
+        if is_go_intra_package_pair(a, b) {
             continue;
         }
         let pair: (String, String) = if a < b {
@@ -597,6 +607,100 @@ fn detect_unstable_dependencies(
     signals
 }
 
+/// Detect systemic complexity: high median/P75 complexity across the codebase.
+///
+/// God module detection catches individual extreme modules, but misses repos like Odoo
+/// where thousands of files are moderately complex (complexity 20-49, LOC 200-499)
+/// without any single file exceeding god module thresholds. This signal fires when
+/// the codebase as a whole has elevated complexity, indicating distributed risk that
+/// individual module analysis misses.
+///
+/// Thresholds:
+/// - Minimum 50 modules (avoids noise in tiny repos)
+/// - Median complexity >= 15 OR P75 complexity >= 30
+/// - Severity scales with how far above threshold the values are
+fn detect_systemic_complexity(node_ids: &[String], graph: &UnifiedGraph) -> Vec<Signal> {
+    let mut complexities: Vec<u32> = node_ids
+        .iter()
+        .filter_map(|id| {
+            let node = graph.get_node(id)?;
+            let c = node.complexity.unwrap_or(0);
+            if c > 0 && !is_test_file(id) && !is_generated_code(id) {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if complexities.len() < 50 {
+        return Vec::new();
+    }
+
+    complexities.sort_unstable();
+    let n = complexities.len();
+    let median = complexities[n / 2];
+    let p75 = complexities[(n as f64 * 0.75) as usize];
+
+    let mut locs: Vec<u32> = node_ids
+        .iter()
+        .filter_map(|id| {
+            let node = graph.get_node(id)?;
+            let loc = node.loc.unwrap_or(0);
+            if loc > 0 && !is_test_file(id) && !is_generated_code(id) {
+                Some(loc)
+            } else {
+                None
+            }
+        })
+        .collect();
+    locs.sort_unstable();
+    let median_loc = if locs.is_empty() {
+        0
+    } else {
+        locs[locs.len() / 2]
+    };
+
+    const MEDIAN_COMPLEXITY_THRESHOLD: u32 = 15;
+    const P75_COMPLEXITY_THRESHOLD: u32 = 30;
+    const MEDIAN_LOC_THRESHOLD: u32 = 150;
+
+    let complexity_breach =
+        median >= MEDIAN_COMPLEXITY_THRESHOLD || p75 >= P75_COMPLEXITY_THRESHOLD;
+    let loc_breach = median_loc >= MEDIAN_LOC_THRESHOLD;
+
+    if !complexity_breach {
+        return Vec::new();
+    }
+
+    // Severity: how far above the thresholds are we?
+    let complexity_ratio = (median as f64 / MEDIAN_COMPLEXITY_THRESHOLD as f64)
+        .max(p75 as f64 / P75_COMPLEXITY_THRESHOLD as f64);
+    let severity = (complexity_ratio - 1.0).max(0.1).min(3.0);
+
+    let mut signals = Vec::new();
+
+    let loc_note = if loc_breach {
+        format!(", median LOC {median_loc}")
+    } else {
+        String::new()
+    };
+
+    signals.push(Signal::new(
+        SignalType::SystemicComplexity,
+        &format!("(codebase: {n} modules)"),
+        None,
+        severity,
+        format!(
+            "Distributed complexity: median complexity {median}, P75 complexity {p75}{loc_note} across {n} modules. \
+             Individual modules may not exceed god-module thresholds, but aggregate complexity is elevated. \
+             Consider identifying clusters of related modules for consolidation.",
+        ),
+    ));
+
+    signals
+}
+
 /// Check if a pair of paths is a test file ↔ source file pair.
 fn is_test_source_pair(a: &str, b: &str) -> bool {
     let a_is_test = is_test_file(a);
@@ -612,8 +716,9 @@ fn is_test_file(path: &str) -> bool {
 /// Filters out directories, config files, docs, lock files, etc.
 fn is_source_file(path: &str) -> bool {
     let source_extensions = [
-        ".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".java", ".rb", ".cpp", ".c", ".h",
-        ".cs", ".swift", ".kt", ".scala",
+        ".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".java", ".rb", ".cpp", ".cc", ".cxx",
+        ".c", ".h", ".hpp", ".hh", ".hxx", ".cs", ".csx", ".swift", ".kt", ".kts", ".scala",
+        ".php", ".vue",
     ];
     source_extensions.iter().any(|ext| path.ends_with(ext))
 }
@@ -636,6 +741,20 @@ fn is_docs_example(path: &str) -> bool {
         || path.starts_with("example/")
         || path.contains("/docs_src/")
         || path.contains("/examples/")
+}
+
+/// Check if two Go files are in the same package (same directory).
+/// Go's package-level imports resolve to all files in the target directory,
+/// creating O(N*M) import edges between packages. This inflates unnecessary
+/// abstraction signals because sibling files in a package naturally don't
+/// co-change with every other file they're structurally linked to.
+fn is_go_intra_package_pair(a: &str, b: &str) -> bool {
+    if !a.ends_with(".go") || !b.ends_with(".go") {
+        return false;
+    }
+    let dir_a = a.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let dir_b = b.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    dir_a == dir_b
 }
 
 /// Check if two paths are in different workspace crates.
@@ -682,12 +801,25 @@ fn is_generated_code(path: &str) -> bool {
         || filename.ends_with(".generated.go")
         || filename.ends_with(".generated.rs")
         || filename.ends_with(".g.dart")
+        || filename.ends_with(".auto.dart")
+        // Django migrations
+        || (path.contains("/migrations/") && filename != "__init__.py")
+        // Rails schema
+        || filename == "schema.rb"
+        // SQLAlchemy / Alembic auto-generated
+        || path.contains("/alembic/versions/")
+        // Thrift / FlatBuffers generated
+        || filename.ends_with("_types.go")
+            && path.contains("/gen/")
         // OpenAPI / Swagger generated
         || path.contains("/generated/")
-        || path.contains("/gen/")
+        || (path.contains("/gen/")
             && (filename.ends_with(".go")
                 || filename.ends_with(".ts")
-                || filename.ends_with(".py"))
+                || filename.ends_with(".py")))
+        // Lock / vendor files that look like source
+        || path.contains("/vendor/")
+        || path.contains("/third_party/")
 }
 
 /// Aggregate signal counts for health index computation.
@@ -704,6 +836,7 @@ pub struct SignalSummary {
     pub fragile_boundary_count: usize,
     pub shotgun_surgery_count: usize,
     pub ghost_coupling_count: usize,
+    pub systemic_complexity_count: usize,
 }
 
 /// Summarize signals by type for health index computation.
@@ -721,6 +854,7 @@ pub fn summarize_signals(signals: &[Signal]) -> SignalSummary {
             SignalType::FragileBoundary => summary.fragile_boundary_count += 1,
             SignalType::ShotgunSurgery => summary.shotgun_surgery_count += 1,
             SignalType::GhostCoupling => summary.ghost_coupling_count += 1,
+            SignalType::SystemicComplexity => summary.systemic_complexity_count += 1,
             SignalType::StableCore | SignalType::UnnecessaryAbstraction => {}
         }
     }

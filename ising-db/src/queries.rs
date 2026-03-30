@@ -471,8 +471,7 @@ impl Database {
         )?;
         let mut rows = stmt.query_map([], |row| {
             let caveats_str: String = row.get::<_, String>(15).unwrap_or_default();
-            let caveats: Vec<String> =
-                serde_json::from_str(&caveats_str).unwrap_or_default();
+            let caveats: Vec<String> = serde_json::from_str(&caveats_str).unwrap_or_default();
             Ok(crate::StoredHealth {
                 score: row.get(0)?,
                 grade: row.get(1)?,
