@@ -80,6 +80,26 @@ pub fn build_structural_graph(
     let module_ids: std::collections::HashSet<&str> =
         file_results.iter().map(|r| r.module_id.as_str()).collect();
 
+    // Build a suffix index for Java/C# imports: the namespace-to-path conversion produces
+    // a relative path like `com/example/Foo.java` that doesn't match Maven/project paths
+    // like `src/main/java/com/example/Foo.java`. We index each module_id by its suffixes
+    // so we can resolve namespace imports to actual project files.
+    let suffix_index: std::collections::HashMap<&str, Vec<&str>> = {
+        let mut map: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+        for id in &module_ids {
+            // Index each slash-delimited suffix of the path
+            let mut start = 0;
+            while let Some(pos) = id[start..].find('/') {
+                start += pos + 1;
+                let suffix = &id[start..];
+                if !suffix.is_empty() {
+                    map.entry(suffix).or_default().push(id);
+                }
+            }
+        }
+        map
+    };
+
     for result in &file_results {
         for imp in &result.imports {
             if module_ids.contains(imp.source.as_str()) {
@@ -105,6 +125,22 @@ pub fn build_structural_graph(
                     {
                         let _ =
                             graph.add_edge(&result.module_id, target_id, EdgeType::Imports, 1.0);
+                    }
+                }
+            } else if imp.source.ends_with(".java") || imp.source.ends_with(".cs") {
+                // Java/C# namespace imports produce paths like `com/example/Foo.java` that
+                // don't match Maven/project paths (`src/main/java/com/example/Foo.java`).
+                // Use suffix matching: find any module whose path ends with `/{import_path}`.
+                if let Some(targets) = suffix_index.get(imp.source.as_str()) {
+                    for target in targets {
+                        if *target != result.module_id.as_str() {
+                            let _ = graph.add_edge(
+                                &result.module_id,
+                                target,
+                                EdgeType::Imports,
+                                1.0,
+                            );
+                        }
                     }
                 }
             }
@@ -1104,6 +1140,78 @@ const setup = () => {}
         assert!(
             graph.get_node("Template.vue").is_some(),
             "Expected module node even without script block"
+        );
+    }
+
+    #[test]
+    fn test_java_maven_import_resolution() {
+        // Java: `import com.example.Owner` should resolve to
+        // `src/main/java/com/example/Owner.java` via suffix matching.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let pkg = root.join("src/main/java/com/example");
+        std::fs::create_dir_all(&pkg).unwrap();
+
+        std::fs::write(
+            pkg.join("Owner.java"),
+            "package com.example;\npublic class Owner {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("Pet.java"),
+            "package com.example;\nimport com.example.Owner;\npublic class Pet { Owner owner; }\n",
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(root, &IgnoreRules::parse("")).unwrap();
+        let import_edges = graph.edges_of_type(&EdgeType::Imports);
+        assert!(
+            !import_edges.is_empty(),
+            "Expected import edge from Pet.java to Owner.java via suffix matching, edges: {:?}",
+            import_edges
+        );
+        let has_edge = import_edges.iter().any(|(src, tgt, _)| {
+            src.ends_with("Pet.java") && tgt.ends_with("Owner.java")
+        });
+        assert!(has_edge, "Expected Pet.java -> Owner.java import edge, got: {:?}", import_edges);
+    }
+
+    #[test]
+    fn test_csharp_import_resolution() {
+        // C#: `using AutoMapper.Features` should resolve to
+        // `src/AutoMapper/Features.cs` via suffix matching (when namespace = file name).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        let src = root.join("src/AutoMapper");
+        std::fs::create_dir_all(&src).unwrap();
+
+        std::fs::write(
+            src.join("Features.cs"),
+            "namespace AutoMapper.Features;\npublic interface IGlobalFeature {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("ProfileMap.cs"),
+            "using AutoMapper.Features;\nnamespace AutoMapper;\npublic class ProfileMap {}\n",
+        )
+        .unwrap();
+
+        let graph = build_structural_graph(root, &IgnoreRules::parse("")).unwrap();
+        let import_edges = graph.edges_of_type(&EdgeType::Imports);
+        assert!(
+            !import_edges.is_empty(),
+            "Expected import edge from ProfileMap.cs to Features.cs via suffix matching, edges: {:?}",
+            import_edges
+        );
+        let has_edge = import_edges.iter().any(|(src, tgt, _)| {
+            src.ends_with("ProfileMap.cs") && tgt.ends_with("Features.cs")
+        });
+        assert!(
+            has_edge,
+            "Expected ProfileMap.cs -> Features.cs import edge, got: {:?}",
+            import_edges
         );
     }
 }
