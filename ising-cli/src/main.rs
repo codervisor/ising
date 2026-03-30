@@ -629,10 +629,7 @@ fn cmd_health(args: HealthArgs) -> Result<i32> {
                 );
             }
             if health.cycle_density > 0.0 {
-                println!(
-                    "    Dep cycles:       {:.1}%",
-                    health.cycle_density * 100.0
-                );
+                println!("    Dep cycles:       {:.1}%", health.cycle_density * 100.0);
             }
             if health.unstable_dep_density > 0.0 {
                 println!(

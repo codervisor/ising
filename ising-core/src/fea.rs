@@ -172,7 +172,6 @@ pub struct HealthIndex {
     pub avg_direct_score: f64,
 
     // --- Signal density metrics (per-module, for cross-repo comparability) ---
-
     /// Total signals / total_modules. Higher = more architectural issues per module.
     #[serde(default)]
     pub signal_density: f64,
@@ -187,7 +186,6 @@ pub struct HealthIndex {
     pub unstable_dep_density: f64,
 
     // --- Sub-scores for transparency [0.0, 1.0] each ---
-
     /// From avg_direct_score + concentration. Measures change-risk pressure.
     #[serde(default)]
     pub risk_sub_score: f64,
@@ -199,7 +197,6 @@ pub struct HealthIndex {
     pub structural_sub_score: f64,
 
     // --- Transparency ---
-
     /// Caveats about data quality or potential bias in this analysis.
     #[serde(default)]
     pub caveats: Vec<String>,

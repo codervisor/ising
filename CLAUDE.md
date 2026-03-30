@@ -57,15 +57,15 @@ Composite score from three sub-scores (see `compute_health_index` in `stress.rs`
 | Sub-score | Weight | Input | Normalization |
 |-----------|--------|-------|---------------|
 | Risk | 0.40 | **Median** direct_score + concentration | 5x amplification |
-| Signals | 0.35 | God modules, cycles, bombs, fragile boundaries | **sqrt(N)** normalization |
+| Signals | 0.35 | God modules, cycles, bombs, fragile boundaries, systemic complexity | **sqrt(N)** normalization (systemic complexity: flat 2.5x, codebase-level) |
 | Structure | 0.25 | Cycle + unstable dep entanglement | **sqrt(N)** normalization |
 
 Grade thresholds: A ≥ 0.85, B ≥ 0.70, C ≥ 0.55, D ≥ 0.40, F < 0.40.
 
 ### Known detector blind spots
 
-- **Odoo gets A** -- god module thresholds (complexity≥50, LOC≥500, CBO≥15) miss distributed complexity across thousands of moderately-complex files. Needs a "systemic complexity" signal type.
-- **Go repos over-penalized** -- package-level imports inflate ghost coupling and unnecessary abstraction counts (GAP-13).
+- **Odoo gets A** -- god module thresholds (complexity≥50, LOC≥500, CBO≥15) miss distributed complexity across thousands of moderately-complex files. **Partially addressed**: `SystemicComplexity` signal now detects elevated median/P75 complexity. Validate against Odoo to confirm grade impact.
+- **Go repos over-penalized** -- package-level imports inflate ghost coupling and unnecessary abstraction counts (GAP-13). **Partially addressed**: Go intra-package pairs now suppressed in unnecessary abstraction detection.
 - **API stability not measured** -- breaking changes, deprecation frequency, interface churn are invisible to the tool.
 
 ## Analytical Discipline
@@ -126,6 +126,7 @@ Cross-layer anomalies detected in `ising-analysis/src/signals.rs`:
 - **UnstableDependency** -- stable module depends on volatile one
 - **StableCore** -- high fan-in, low change, protect it
 - **UnnecessaryAbstraction** -- structural dep exists but files never co-change
+- **SystemicComplexity** -- median/P75 complexity elevated across codebase (catches Odoo-like distributed complexity that GodModule misses)
 
 ## Conventions
 

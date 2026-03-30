@@ -3,8 +3,8 @@
 //! Computes change load, capacity, propagated risk, and safety factors.
 //! Uses influence propagation along both co-change and structural edges.
 
-use ising_core::config::Config;
 use crate::signals::SignalSummary;
+use ising_core::config::Config;
 use ising_core::fea::{
     HealthIndex, LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta, RiskField, RiskTier,
     SafetyZone,
@@ -471,7 +471,8 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     let total_f = (total_modules as f64).max(1.0);
 
     if active_modules == 0 {
-        let caveats = vec!["No modules have change history; score reflects structure only".to_string()];
+        let caveats =
+            vec!["No modules have change history; score reflects structure only".to_string()];
         return HealthIndex {
             score: 1.0,
             grade: "A".to_string(),
@@ -559,20 +560,19 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         + (signals.fragile_boundary_count as f64 / sqrt_n) * 2.0
         + (signals.shotgun_surgery_count as f64 / sqrt_n) * 1.5
         + (signals.unstable_dep_count as f64 / sqrt_n) * 2.0
-        + (signals.ghost_coupling_count as f64 / sqrt_n) * 1.0;
+        + (signals.ghost_coupling_count as f64 / sqrt_n) * 1.0
+        + (signals.systemic_complexity_count as f64) * 2.5;
     // Scale factor of 0.3: calibrated so that weighted_signal_score=2 → sub_score ≈ 0.63
     let signal_sub_score = (1.0 / (1.0 + weighted_signal_score * 0.3)).clamp(0.0, 1.0);
 
     // === Sub-score 3: Structure (25%) ===
     // Uses sqrt normalization for consistency.
-    let entanglement_score =
-        (signals.cycle_count + signals.unstable_dep_count) as f64 / sqrt_n;
+    let entanglement_score = (signals.cycle_count + signals.unstable_dep_count) as f64 / sqrt_n;
     let structural_sub_score = (1.0 / (1.0 + entanglement_score * 0.5)).clamp(0.0, 1.0);
 
     // === Final composite score ===
-    let score =
-        (risk_sub_score * 0.40 + signal_sub_score * 0.35 + structural_sub_score * 0.25)
-            .clamp(0.0, 1.0);
+    let score = (risk_sub_score * 0.40 + signal_sub_score * 0.35 + structural_sub_score * 0.25)
+        .clamp(0.0, 1.0);
 
     let grade = if score >= 0.85 {
         "A"
