@@ -134,12 +134,8 @@ pub fn build_structural_graph(
                 if let Some(targets) = suffix_index.get(imp.source.as_str()) {
                     for target in targets {
                         if *target != result.module_id.as_str() {
-                            let _ = graph.add_edge(
-                                &result.module_id,
-                                target,
-                                EdgeType::Imports,
-                                1.0,
-                            );
+                            let _ =
+                                graph.add_edge(&result.module_id, target, EdgeType::Imports, 1.0);
                         }
                     }
                 }
@@ -1171,10 +1167,14 @@ const setup = () => {}
             "Expected import edge from Pet.java to Owner.java via suffix matching, edges: {:?}",
             import_edges
         );
-        let has_edge = import_edges.iter().any(|(src, tgt, _)| {
-            src.ends_with("Pet.java") && tgt.ends_with("Owner.java")
-        });
-        assert!(has_edge, "Expected Pet.java -> Owner.java import edge, got: {:?}", import_edges);
+        let has_edge = import_edges
+            .iter()
+            .any(|(src, tgt, _)| src.ends_with("Pet.java") && tgt.ends_with("Owner.java"));
+        assert!(
+            has_edge,
+            "Expected Pet.java -> Owner.java import edge, got: {:?}",
+            import_edges
+        );
     }
 
     #[test]
@@ -1205,9 +1205,9 @@ const setup = () => {}
             "Expected import edge from ProfileMap.cs to Features.cs via suffix matching, edges: {:?}",
             import_edges
         );
-        let has_edge = import_edges.iter().any(|(src, tgt, _)| {
-            src.ends_with("ProfileMap.cs") && tgt.ends_with("Features.cs")
-        });
+        let has_edge = import_edges
+            .iter()
+            .any(|(src, tgt, _)| src.ends_with("ProfileMap.cs") && tgt.ends_with("Features.cs"));
         assert!(
             has_edge,
             "Expected ProfileMap.cs -> Features.cs import edge, got: {:?}",
