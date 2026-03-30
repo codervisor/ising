@@ -501,12 +501,23 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         .filter(|n| n.risk_tier == RiskTier::High)
         .count();
 
-    // --- Average direct score across active modules ---
+    // --- Median direct score across active modules ---
+    // We use MEDIAN instead of mean because mean is dominated by outliers.
+    // In small repos (e.g., gin with 98 modules), one hot file inflates the mean
+    // from ~0.05 to ~0.36. Median gives a representative "typical module" measure.
+    // For large repos, median ≈ mean so this doesn't regress.
     let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
     let avg_direct_score = total_direct / active_modules as f64;
 
-    // --- Risk concentration ---
     let mut scores: Vec<f64> = active.iter().map(|n| n.direct_score).collect();
+    scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_direct_score = if scores.len() % 2 == 0 && scores.len() >= 2 {
+        (scores[scores.len() / 2 - 1] + scores[scores.len() / 2]) / 2.0
+    } else {
+        scores[scores.len() / 2]
+    };
+
+    // --- Risk concentration ---
     scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let top_10_count = (scores.len() as f64 * 0.10).ceil() as usize;
     let top_10_sum: f64 = scores.iter().take(top_10_count).sum();
@@ -516,38 +527,47 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         1.0
     };
 
-    // --- Signal densities (per-module) ---
+    // --- Signal densities ---
+    // Stored as per-module density for display, but scoring uses sqrt normalization.
     let signal_density = signals.total_signals as f64 / total_f;
     let god_module_density = signals.god_module_count as f64 / total_f;
     let cycle_density = signals.cycle_count as f64 / total_f;
     let unstable_dep_density = signals.unstable_dep_count as f64 / total_f;
 
     // === Sub-score 1: Risk (40%) ===
-    // Amplify avg_direct_score by 5x so the formula discriminates better.
-    // Without amplification: avg=0.03 → 1/(1+0.03) = 0.97 (everything looks great)
-    // With amplification:    avg=0.03 → 1/(1+0.15) = 0.87 (still good, but distinguishable)
-    let base_health = 1.0 / (1.0 + avg_direct_score * 5.0);
+    // Use median direct score (robust to outliers) with 5x amplification.
+    // The amplification spreads the distribution: median=0.01 → 0.95, median=0.1 → 0.67.
+    let base_health = 1.0 / (1.0 + median_direct_score * 5.0);
     let concentration_factor = 0.8 + 0.2 * risk_concentration;
     let risk_sub_score = (base_health * concentration_factor).clamp(0.0, 1.0);
 
     // === Sub-score 2: Signals (35%) ===
-    // Weight critical signal types more heavily.
-    // god_modules and cycles are the strongest architectural indicators.
-    let weighted_signal_density = god_module_density * 3.0
-        + cycle_density * 4.0
-        + (signals.ticking_bomb_count as f64 / total_f) * 3.0
-        + (signals.fragile_boundary_count as f64 / total_f) * 2.0
-        + (signals.shotgun_surgery_count as f64 / total_f) * 1.5
-        + unstable_dep_density * 2.0
-        + (signals.ghost_coupling_count as f64 / total_f) * 1.0;
-    // Scale factor of 20: at density=0.05 (5%), score = 1/(1+1.0) = 0.50
-    let signal_sub_score = (1.0 / (1.0 + weighted_signal_density * 20.0)).clamp(0.0, 1.0);
+    // Signal counts are normalized by sqrt(total_modules) instead of total_modules.
+    //
+    // Why: count/N lets large repos hide behind their denominator. 131 god modules in
+    // 15,000 files = 0.87% looks fine, but 131 god modules is genuinely bad. count/sqrt(N)
+    // keeps the relationship sub-linear — same principle as TF-IDF document frequency
+    // normalization, which is well-studied for comparing metrics across different-sized
+    // collections.
+    //
+    // Effect: gin 2/sqrt(98)=0.20, grafana 131/sqrt(15000)=1.07 — 5.3x difference
+    // vs 65x with raw counts or 0.4x with density. sqrt gives a balanced middle ground.
+    let sqrt_n = total_f.sqrt();
+    let weighted_signal_score = (signals.god_module_count as f64 / sqrt_n) * 3.0
+        + (signals.cycle_count as f64 / sqrt_n) * 4.0
+        + (signals.ticking_bomb_count as f64 / sqrt_n) * 3.0
+        + (signals.fragile_boundary_count as f64 / sqrt_n) * 2.0
+        + (signals.shotgun_surgery_count as f64 / sqrt_n) * 1.5
+        + (signals.unstable_dep_count as f64 / sqrt_n) * 2.0
+        + (signals.ghost_coupling_count as f64 / sqrt_n) * 1.0;
+    // Scale factor of 0.3: calibrated so that weighted_signal_score=2 → sub_score ≈ 0.63
+    let signal_sub_score = (1.0 / (1.0 + weighted_signal_score * 0.3)).clamp(0.0, 1.0);
 
     // === Sub-score 3: Structure (25%) ===
-    // What fraction of modules are entangled in cycles or unstable deps?
-    let entanglement_count = signals.cycle_count + signals.unstable_dep_count;
-    let entanglement_ratio = (entanglement_count as f64 / total_f).clamp(0.0, 1.0);
-    let structural_sub_score = 1.0 - entanglement_ratio;
+    // Uses sqrt normalization for consistency.
+    let entanglement_score =
+        (signals.cycle_count + signals.unstable_dep_count) as f64 / sqrt_n;
+    let structural_sub_score = (1.0 / (1.0 + entanglement_score * 0.5)).clamp(0.0, 1.0);
 
     // === Final composite score ===
     let score =

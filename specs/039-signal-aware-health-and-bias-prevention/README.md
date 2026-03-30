@@ -6,11 +6,11 @@ tags:
 - health-index
 - bias-prevention
 - signal-density
-- research-grounded
+- empirical-validation
 depends_on:
 - '038'
 created_at: 2026-03-30T20:00:00Z
-updated_at: 2026-03-30T21:00:00Z
+updated_at: 2026-03-30T22:00:00Z
 ---
 
 # Signal-Aware Health Index & Bias Prevention
@@ -19,126 +19,134 @@ updated_at: 2026-03-30T21:00:00Z
 
 ## Problem
 
-The auto-calibrated risk model (spec 038) solved over-classification by using percentile-based tiers, but the health index formula had a blind spot: it only measured change-risk distribution, ignoring architectural signals entirely.
+The auto-calibrated risk model (spec 038) solved over-classification, but the health index only measured change-risk distribution and ignored architectural signals. All repos got grade A:
 
-**Result**: repos with dramatically different signal profiles got the same grade:
-
-| Repo | Grade | Signals | God Modules | Cycles |
+| Repo | Signals | God Modules | Cycles | Old Grade |
 |---|---|---|---|---|
-| fastapi | A (100%) | 26 | 1 | 0 |
-| grafana | A (96%) | 3,666 | 131 | 14 |
-| home-assistant | A (97%) | 2,215 | 90 | 28 |
+| fastapi | 26 | 1 | 0 | A (100%) |
+| grafana | 3,666 | 131 | 14 | A (96%) |
+| home-assistant | 2,215 | 90 | 28 | A (97%) |
 
-This happened because `1.0 / (1.0 + avg_direct_score)` converges to ~1.0 for any repo with thousands of modules — the denominator is diluted by the long tail of low-risk files.
+## Solution: Composite Health with Three Sub-Scores
 
-### Bias problem
-
-Beyond the formula, the analysis methodology itself had multiple sources of bias:
-
-1. **Selection bias**: choosing "good" and "bad" repos based on reputation
-2. **Scale bias**: large repos look different from small repos purely due to size
-3. **Threshold bias**: hard-coded values (god_module_complexity=50) mean different things in different languages
-4. **Confirmation bias**: interpreting results to match expectations
-5. **Opacity bias**: a single number hides what's actually being measured
-
-## Solution: Composite Health with Sub-Score Decomposition
-
-### Three sub-scores
-
-The health index is now a weighted composite of three independent dimensions:
-
-#### 1. Risk sub-score (weight: 0.40)
+### Sub-score 1: Risk (weight 0.40)
 
 ```
-base_health = 1.0 / (1.0 + avg_direct_score * 5.0)
+median_direct = median of direct_score across active modules
+base_health = 1.0 / (1.0 + median_direct * 5.0)
 risk_sub = base_health * (0.8 + 0.2 * risk_concentration)
 ```
 
-The 5x amplification factor spreads the distribution. Without it, avg=0.03 gives 0.97; with it, 0.87. This is grounded in the observation that across 20+ repos, avg_direct_score ranges from 0.003 to 0.360 — the amplification makes this range discriminating.
+**Uses median, not mean.** The mean is dominated by outliers. In gin (98 modules), one hot file (`context.go`) inflated the mean from ~0.05 to ~0.52. With mean, gin scored 0.26 (grade D). With median, gin scores 0.64 (grade B). Gin is a well-maintained framework — D was wrong.
 
-#### 2. Signal sub-score (weight: 0.35)
-
-```
-weighted_density = god_module_density * 3.0
-                 + cycle_density * 4.0
-                 + ticking_bomb_density * 3.0
-                 + fragile_boundary_density * 2.0
-                 + shotgun_surgery_density * 1.5
-                 + unstable_dep_density * 2.0
-                 + ghost_coupling_density * 1.0
-
-signal_sub = 1.0 / (1.0 + weighted_density * 20.0)
-```
-
-All densities are **per-module** (count / total_modules), making them scale-invariant. The weights reflect severity: dependency cycles and god modules are the strongest predictors of maintenance difficulty.
-
-#### 3. Structural sub-score (weight: 0.25)
+### Sub-score 2: Signals (weight 0.35)
 
 ```
-entanglement_ratio = (cycle_count + unstable_dep_count) / total_modules
-structural_sub = 1.0 - entanglement_ratio
+sqrt_n = sqrt(total_modules)
+weighted = (god_count / sqrt_n) * 3.0
+         + (cycle_count / sqrt_n) * 4.0
+         + (bomb_count / sqrt_n) * 3.0
+         + (fragile_count / sqrt_n) * 2.0
+         + (shotgun_count / sqrt_n) * 1.5
+         + (unstable_count / sqrt_n) * 2.0
+         + (ghost_count / sqrt_n) * 1.0
+
+signal_sub = 1.0 / (1.0 + weighted * 0.3)
 ```
 
-Direct measure of how entangled the dependency graph is. A repo where 10% of modules participate in cycles or violate the Stable Dependencies Principle will score 0.90; one with 30% entanglement scores 0.70.
+**Uses sqrt(N) normalization, not density (count/N).** This is the same principle as TF-IDF document frequency normalization. Pure density lets large repos hide: 131 god modules / 15,000 = 0.87% looks fine. With sqrt: 131/122 = 1.07, which correctly reflects that 131 god modules is a lot.
 
-### Research grounding for weights and thresholds
+| Repo | god_count/N | god_count/sqrt(N) | Better? |
+|---|---|---|---|
+| gin (98 mod) | 2.0% | 0.20 | Yes — less punished |
+| grafana (15K mod) | 0.87% | 1.07 | Yes — can't hide |
 
-| Parameter | Value | Research basis |
+### Sub-score 3: Structure (weight 0.25)
+
+```
+entanglement = (cycle_count + unstable_dep_count) / sqrt(N)
+structural_sub = 1.0 / (1.0 + entanglement * 0.5)
+```
+
+### Signal type weights
+
+| Signal | Weight | Why |
 |---|---|---|
-| Risk tier: top 1% = Critical | 1% | Cognitive load research (Miller's Law: 7±2 items). For a 1000-module repo, 1% = 10 items — within team attention span |
-| Risk tier: top 5% = High | 5% | Statistical significance threshold (p < 0.05). Modules in the top 5% are statistically distinguishable from baseline |
-| Risk tier: top 15% = Medium | 15% | Pareto principle variants. Fenton & Ohlsson (2000): ~20% of modules contain ~80% of defects. 15% is a conservative bound |
-| Signal weight: cycles (4x) | 4.0 | ISO 25010 modularity dimension. Cycles are the strongest violation of modular design and the hardest to untangle |
-| Signal weight: god modules (3x) | 3.0 | ISO 25010 analyzability. God modules correlate with defect density (Lanza & Marinescu 2006, "Object-Oriented Metrics in Practice") |
-| Signal weight: ghost coupling (1x) | 1.0 | Lower weight because ghost coupling may be benign (shared config, documentation). Higher weights for confirmed architectural violations |
-| Health amplification (5x) | 5.0 | Empirically calibrated: across 12 repos (spec 037-038), the 5x factor produces grades from B (79%) to A (100%), matching expert assessment of repo quality |
+| Cycles | 4.0 | Hardest to fix; cascading rebuild/test impacts |
+| God modules | 3.0 | Strongest defect density correlate |
+| Ticking bombs | 3.0 | Triple threat: hotspot + defect + coupling |
+| Fragile boundary | 2.0 | Active breakage pattern |
+| Unstable deps | 2.0 | Stability principle violation |
+| Shotgun surgery | 1.5 | Change amplification |
+| Ghost coupling | 1.0 | Often benign (shared config) |
 
-### Bias prevention measures
+**These weights are NOT research-derived.** They reflect engineering judgment. We have no empirical validation that cycles deserve 4x and ghost coupling deserves 1x. The ordering is defensible but the magnitudes are arbitrary.
 
-| Bias type | Mitigation |
-|---|---|
-| **Scale bias** | All signal metrics use density (per-module), not absolute counts. 131 god modules in 15,000 modules (0.87%) is directly comparable to 1 in 100 (1.0%) |
-| **Opacity bias** | Three sub-scores displayed separately so users see what drives the grade. A repo can have good risk scores but bad signal scores, and this is visible |
-| **Data quality bias** | Caveats automatically emitted when: <5% of modules have change history, no signals detected in large repos, no ticking bombs (missing defect data) |
-| **Threshold bias** | Risk tiers use percentiles (self-calibrating). God module detection still uses absolute thresholds but these are configurable via `ising.toml` |
-| **Selection bias** | The tool itself doesn't select repos. But documentation notes that comparing repos requires similar git history depth and time windows |
-| **Confirmation bias** | Sub-score decomposition forces the model to "show its work" — users can challenge individual dimensions |
+## Empirical validation (12 repos)
 
-### Caveats system
+We ran the formula against 12 real repos and checked whether the grades are defensible:
 
-The health index now emits caveats when analysis may be unreliable:
+| Repo | Modules | Grade | Risk | Signal | Struct | Verdict |
+|---|---|---|---|---|---|---|
+| fastapi | 1,513 | A (93%) | 0.92 | 0.92 | 0.96 | Correct |
+| gin | 98 | B (80%) | 0.64 | 0.85 | 1.00 | Correct (was D before median fix) |
+| django-rest-framework | 175 | A (95%) | 0.87 | 1.00 | 1.00 | Correct |
+| langchain | 2,548 | A (96%) | 0.91 | 0.98 | 1.00 | **Questionable** — see below |
+| llama.cpp | 313 | A (91%) | 0.90 | 0.88 | 0.97 | Plausible |
+| open-webui | 317 | B (73%) | 0.84 | 0.41 | 1.00 | Plausible |
+| ha-core | 16,679 | B (75%) | 0.84 | 0.52 | 0.90 | Plausible |
+| ollama | 956 | C (65%) | 0.75 | 0.32 | 0.94 | **Questionable** — see below |
+| vllm | 2,893 | C (67%) | 0.76 | 0.42 | 0.86 | Plausible |
+| transformers | 4,303 | C (62%) | 0.75 | 0.32 | 0.85 | Plausible |
+| grafana | 14,966 | C (60%) | 0.83 | 0.35 | 0.59 | Plausible |
+| **odoo** | **14,178** | **A (94%)** | **0.93** | **0.92** | **0.97** | **WRONG** |
 
-- `"Only X% of modules have change history; risk scores reflect recent activity only"` — when < 5% of modules are active
-- `"No architectural signals detected; verify analysis included sufficient git history"` — when 0 signals in 50+ module repo
-- `"No ticking bombs detected; this may indicate missing defect/bug-fix data"` — when no defect data available
+### Known inaccuracies
 
-## Expected results with new formula
+**Odoo gets A (94%) despite being notoriously complex.** With 14,178 modules, only 4 trigger god module detection (complexity≥50, LOC≥500, CBO≥15). Odoo's complexity is systemic — distributed across thousands of moderately-complex files rather than concentrated in a few giant ones. Our signal detector literally cannot see this pattern. No formula adjustment will fix this; the detector itself needs new signal types (e.g., "systemic complexity" when median complexity is high).
 
-Based on the comparison repos analyzed in this session:
+**LangChain gets A (96%) with only 3 signals.** Either LangChain is genuinely well-structured (its heavily modular design is intentional) or our signals miss its failure mode (rapid API churn, unstable interfaces across versions). We don't measure API stability or breaking change frequency — that's a gap.
 
-| Repo | Old Grade | New Grade (est.) | Risk | Signals | Structure |
-|---|---|---|---|---|---|
-| fastapi | A (100%) | A | 0.94 | 0.98 | 1.00 |
-| gin | B (79%) | B | 0.59 | 0.96 | 1.00 |
-| django-rest-framework | A (96%) | A | 0.87 | 0.98 | 1.00 |
-| home-assistant | A (97%) | B-C | 0.87 | 0.60 | 0.99 |
-| grafana | A (96%) | B-C | 0.86 | 0.45 | 0.99 |
-| odoo | A (100%) | A | 0.99 | 0.96 | 1.00 |
+**Ollama gets C (65%) which may be too harsh.** Its signal_density of 0.424 is driven by Go-specific false positives (GAP-13: package-level imports inflate ghost coupling and unnecessary abstraction counts). The formula correctly reflects what the detector reports, but the detector has known Go-specific biases.
 
-The key change: **grafana and home-assistant will no longer get grade A** because their signal density (131 god modules, 28 cycles) will pull down the signal sub-score significantly.
+## Bias analysis
+
+### Biases we fixed
+
+| Bias | Problem | Fix |
+|---|---|---|
+| Outlier sensitivity | Mean dominated by one hot file in small repos | **Median** direct score |
+| Large-repo hiding | count/N dilutes signals in large repos | **sqrt(N)** normalization |
+| Opacity | Single number hides what's measured | **Three sub-scores** shown separately |
+| Data quality | No warning when data is insufficient | **Caveats** system |
+
+### Biases we did NOT fix
+
+| Bias | Problem | Why unfixed |
+|---|---|---|
+| **God module thresholds** | Hard-coded complexity≥50 misses Odoo's distributed complexity | Requires new signal type, not formula tuning |
+| **Go signal inflation** | Go packages produce more ghost coupling/unnecessary abstraction signals | GAP-13 partially mitigated but not fully solved |
+| **Missing signal types** | API stability, breaking changes, test coverage not measured | Would need new data sources |
+| **Signal weight magnitudes** | 4x for cycles vs 1x for ghost coupling is engineering judgment | Would need defect correlation study to validate |
+| **Time window sensitivity** | Different `--since` windows produce different change_load distributions | Inherent to the approach; documented but not solved |
+
+### What "grade A" actually means
+
+Grade A means: "Among modules with change activity, the median risk is low, and the architectural signals our detector can find are sparse relative to codebase size."
+
+Grade A does NOT mean: "This codebase is well-maintained" or "This codebase has low defect rates." Those claims require data we don't have (defect histories, maintenance cost records, developer surveys).
 
 ## Changes Made
 
 ### `ising-core/src/fea.rs`
-- Extended `HealthIndex` with signal density fields, sub-scores, and caveats
+- Extended `HealthIndex` with signal density fields, sub-scores, and caveats vector
 
 ### `ising-analysis/src/signals.rs`
-- Added `SignalSummary` struct for aggregating signal counts by type
-- Added `summarize_signals()` function
+- Added `SignalSummary` struct and `summarize_signals()` function
 
 ### `ising-analysis/src/stress.rs`
 - Changed `compute_risk_field()` to accept `Option<&SignalSummary>`
-- Rewrote `compute_health_index()` with three-part composite formula
+- Rewrote `compute_health_index()`: median-based risk, sqrt-normalized signals, three sub-scores
 - Added caveat generation for data quality issues
 
 ### `ising-db/src/schema.rs`
@@ -159,6 +167,7 @@ The key change: **grafana and home-assistant will no longer get grade A** becaus
 
 ## Future work
 
-- **Percentile-based god module detection**: Instead of hard-coded `complexity >= 50`, use the repo's own distribution (top 5% in all three dimensions). This would eliminate language bias but risks circular reasoning (top 5% is always "god" regardless of absolute quality). Needs empirical validation.
-- **Cross-repo percentile database**: Maintain a baseline of signal densities across analyzed repos to provide "compared to X other repos" context. This addresses selection bias by providing a reference population.
-- **Temporal health tracking**: Track health grade over time to detect degradation trends rather than just point-in-time snapshots.
+1. **New signal: systemic complexity** — detect when median/p75 complexity across the repo is high, even if no individual file crosses the god module threshold. This would catch Odoo's pattern.
+2. **Defect correlation study** — validate signal weights against actual defect rates across repos. Currently the weights are assumptions.
+3. **Go-specific signal calibration** — measure false positive rate of ghost coupling in Go repos and apply correction factor.
+4. **API stability signal** — measure breaking changes, deprecation frequency, interface churn. Would catch LangChain's failure mode if it exists.
