@@ -152,10 +152,10 @@ fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
                 *decisions += 1;
             }
             "binary_expression" => {
-                if let Some(op) = node.child_by_field_name("operator") {
-                    if op.kind() == "&&" || op.kind() == "||" || op.kind() == "??" {
-                        *decisions += 1;
-                    }
+                if let Some(op) = node.child_by_field_name("operator")
+                    && (op.kind() == "&&" || op.kind() == "||" || op.kind() == "??")
+                {
+                    *decisions += 1;
                 }
             }
             "switch_expression_arm" => {
