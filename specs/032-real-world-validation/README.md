@@ -45,7 +45,7 @@ Ran Ising (with the 4 new signals from this branch: DependencyCycle, GodModule, 
 
 ### 2. codervisor/lean-spec (most active repo)
 
-**Signal breakdown**: 19 god_module, 42 ghost_coupling, 6 shotgun_surgery, 2 dependency_cycle, 1 over_engineering, 48 stable_core
+**Signal breakdown**: 19 god_module, 42 ghost_coupling, 6 shotgun_surgery, 2 dependency_cycle, 1 unnecessary_abstraction, 48 stable_core
 
 This is the richest dataset — a fast-moving monorepo with 367 commits in 12 months.
 
@@ -123,7 +123,7 @@ No change edges detected (crawlab had no commits within the shallow clone's 12-m
 | StableCore | 6 | 48 | 38 | 0 | 92 |
 | ShotgunSurgery | 0 | 6 | 0 | 0 | 6 |
 | DependencyCycle | 0 | 2 | 0 | 0 | 2 |
-| OverEngineering | 0 | 1 | 0 | 0 | 1 |
+| UnnecessaryAbstraction | 0 | 1 | 0 | 0 | 1 |
 | UnstableDependency | 0 | 0 | 0 | 0 | 0 |
 | **Total** | **8** | **118** | **39** | **7** | **172** |
 

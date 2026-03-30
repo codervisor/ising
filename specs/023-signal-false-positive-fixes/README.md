@@ -26,7 +26,7 @@ After implementing spec 022 (builder decomposition), re-running Ising on itself 
 ```
   [1.00] ghost_coupling: ising-builders/src/change.rs <-> ising-builders/src/structural.rs
   [0.83] ghost_coupling: ising-builders/src/structural.rs <-> ising-db/src/lib.rs
-  [0.40] over_engineering: ising-builders/src/lib.rs <-> ising-builders/src/languages/mod.rs
+  [0.40] unnecessary_abstraction: ising-builders/src/lib.rs <-> ising-builders/src/languages/mod.rs
   [0.10] stable_core: ising-db/src/export.rs
   [0.10] stable_core: ising-builders/src/common.rs
   [0.10] stable_core: ising-builders/src/languages/mod.rs
@@ -56,7 +56,7 @@ After implementing spec 022 (builder decomposition), re-running Ising on itself 
 
 **Root cause in detection logic:** Same as FP1 — no common-parent check. Additionally, the detection doesn't account for **shared data type coupling**: when two modules both depend on the same core type (`UnifiedGraph`), changes to the type's shape naturally cause co-changes in both consumers.
 
-### FP3: OverEngineering — `lib.rs` ↔ `languages/mod.rs` (severity 0.40)
+### FP3: UnnecessaryAbstraction — `lib.rs` ↔ `languages/mod.rs` (severity 0.40)
 
 **Why it fires:** `languages/mod.rs` has fan-in=1 (only `lib.rs` imports it directly), complexity ≤ 5, and change_freq ≤ 1. This matches the "single-consumer wrapper" pattern.
 
@@ -88,7 +88,7 @@ Add a check to the ghost coupling detector: if both A and B are imported by a co
 
 **Edge case:** If A and B share a parent but ALSO have very high coupling (≥ 0.9), still emit the signal but at reduced severity (× 0.3) with an amended description: "Co-change likely explained by shared parent {C}, but coupling is very high — verify no hidden dependency."
 
-### Fix 2: Rust barrel-file recognition for OverEngineering
+### Fix 2: Rust barrel-file recognition for UnnecessaryAbstraction
 
 Extend `is_reexport_module()` to recognize Rust module patterns.
 
@@ -148,7 +148,7 @@ When two modules both import from a common core type crate (e.g., both depend on
 ## Acceptance criteria
 
 - [ ] Self-analysis produces 0 ghost_coupling signals for sibling modules with a common parent
-- [ ] Self-analysis produces 0 over_engineering signals for `mod.rs` barrel files
+- [ ] Self-analysis produces 0 unnecessary_abstraction signals for `mod.rs` barrel files
 - [ ] All existing signal detection tests continue to pass
 - [ ] New tests cover common-parent suppression and `mod.rs` recognition
 - [ ] No regression: ghost coupling still fires for genuinely unrelated co-changing modules

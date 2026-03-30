@@ -18,7 +18,7 @@ pub enum SignalType {
     /// Structural dep + high co-change + fault propagation — broken interface.
     FragileBoundary,
     /// Structural dep but never co-change — possibly unnecessary abstraction.
-    OverEngineering,
+    UnnecessaryAbstraction,
     /// High fan-in, low change freq, low defects — stable foundation.
     StableCore,
     /// High hotspot + high defects + high coupling — most dangerous code.
@@ -44,7 +44,7 @@ impl SignalType {
             | SignalType::ShotgunSurgery
             | SignalType::UnstableDependency => "high",
             SignalType::StableCore => "guard",
-            SignalType::OverEngineering => "info",
+            SignalType::UnnecessaryAbstraction => "info",
         }
     }
 }
@@ -95,7 +95,7 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         graph,
         &config.thresholds,
     ));
-    signals.extend(detect_over_engineering(
+    signals.extend(detect_unnecessary_abstraction(
         &import_edges,
         graph,
         &config.thresholds,
@@ -216,12 +216,12 @@ fn detect_fragile_boundaries(
     signals
 }
 
-fn detect_over_engineering(
+fn detect_unnecessary_abstraction(
     import_edges: &[(&str, &str, f64)],
     graph: &UnifiedGraph,
     thresholds: &ThresholdConfig,
 ) -> Vec<Signal> {
-    // Over-Engineering: detect likely unnecessary abstractions
+    // Unnecessary Abstraction: detect likely unnecessary abstractions
     //
     // A low co-change rate between A→B is NOT a signal by itself — most stable,
     // well-designed dependencies have exactly this profile. Instead we look for:
@@ -263,7 +263,7 @@ fn detect_over_engineering(
         }
 
         let coupling_ab = graph.edge_weight(a, b, &EdgeType::CoChanges).unwrap_or(0.0);
-        if coupling_ab >= thresholds.over_engineering_coupling {
+        if coupling_ab >= thresholds.unnecessary_abstraction_coupling {
             continue;
         }
 
@@ -278,7 +278,7 @@ fn detect_over_engineering(
         // Signal 1: Single-consumer wrapper
         if b_fan_in == 1 && b_complexity <= 5 && b_change_freq <= 1 {
             signals.push(Signal::new(
-                SignalType::OverEngineering,
+                SignalType::UnnecessaryAbstraction,
                 a,
                 Some(b),
                 0.4,
@@ -296,10 +296,10 @@ fn detect_over_engineering(
                 let coupling_ac = graph.edge_weight(a, c, &EdgeType::CoChanges).unwrap_or(0.0);
                 let coupling_bc = graph.edge_weight(b, c, &EdgeType::CoChanges).unwrap_or(0.0);
                 if coupling_ac > thresholds.ghost_coupling_threshold
-                    && coupling_bc < thresholds.over_engineering_coupling
+                    && coupling_bc < thresholds.unnecessary_abstraction_coupling
                 {
                     signals.push(Signal::new(
-                        SignalType::OverEngineering,
+                        SignalType::UnnecessaryAbstraction,
                         a,
                         Some(b),
                         coupling_ac * 0.5,
@@ -625,7 +625,7 @@ fn is_source_file(path: &str) -> bool {
 
 /// Check if a path is a documentation example (e.g., docs_src/, examples/).
 /// These files naturally have fan-in=1 and rarely co-change with their imports,
-/// but flagging them as over-engineering or stable core is noise.
+/// but flagging them as unnecessary abstraction or stable core is noise.
 fn is_docs_example(path: &str) -> bool {
     path.starts_with("docs_src/")
         || path.starts_with("docs/")
@@ -757,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn test_over_engineering_single_consumer_wrapper() {
+    fn test_unnecessary_abstraction_single_consumer_wrapper() {
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
         // b is a trivial single-consumer module: low complexity, never changes
@@ -765,18 +765,18 @@ mod tests {
         b_node.complexity = Some(2);
         g.add_node(b_node);
         g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
-        // No co-change, b has fan-in=1 and low complexity → over-engineering
+        // No co-change, b has fan-in=1 and low complexity → unnecessary abstraction
 
         let signals = detect_signals(&g, &default_config());
         assert!(
             signals
                 .iter()
-                .any(|s| s.signal_type == SignalType::OverEngineering)
+                .any(|s| s.signal_type == SignalType::UnnecessaryAbstraction)
         );
     }
 
     #[test]
-    fn test_no_over_engineering_for_stable_dependency() {
+    fn test_no_unnecessary_abstraction_for_stable_dependency() {
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
         // b is used by multiple consumers — not a single-consumer wrapper
@@ -792,12 +792,12 @@ mod tests {
         assert!(
             !signals
                 .iter()
-                .any(|s| s.signal_type == SignalType::OverEngineering)
+                .any(|s| s.signal_type == SignalType::UnnecessaryAbstraction)
         );
     }
 
     #[test]
-    fn test_over_engineering_pass_through() {
+    fn test_unnecessary_abstraction_pass_through() {
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
         // b is non-trivial (high complexity) so it doesn't match single-consumer wrapper
@@ -816,7 +816,7 @@ mod tests {
         assert!(
             signals
                 .iter()
-                .any(|s| s.signal_type == SignalType::OverEngineering
+                .any(|s| s.signal_type == SignalType::UnnecessaryAbstraction
                     && s.description.contains("Pass-through"))
         );
     }
@@ -931,8 +931,8 @@ mod tests {
     }
 
     #[test]
-    fn test_no_over_engineering_for_mod_rs() {
-        // mod.rs barrel files should not trigger over-engineering
+    fn test_no_unnecessary_abstraction_for_mod_rs() {
+        // mod.rs barrel files should not trigger unnecessary abstraction
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("src/lib.rs", "src/lib.rs"));
         let mut mod_node = Node::module("src/languages/mod.rs", "src/languages/mod.rs");
@@ -945,8 +945,8 @@ mod tests {
         assert!(
             !signals
                 .iter()
-                .any(|s| s.signal_type == SignalType::OverEngineering),
-            "mod.rs barrel files should not trigger over-engineering signals"
+                .any(|s| s.signal_type == SignalType::UnnecessaryAbstraction),
+            "mod.rs barrel files should not trigger unnecessary abstraction signals"
         );
     }
 

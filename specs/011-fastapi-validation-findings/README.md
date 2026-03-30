@@ -91,7 +91,7 @@ graph TD
 | Signal | Count | Key Findings |
 |--------|-------|-------------|
 | **Ghost Coupling** | ~4 pairs | `routing.py` ↔ `_compat/__init__.py` (56% co-change, no direct import). Hidden contract via shared version-compat logic. |
-| **Over-Engineering** | 2 | `asyncexitstack.py` (18 lines, 1 class, single consumer `applications.py` — inline candidate). `forward_reference_type.py` (9 lines, test fixture — deliberate). |
+| **Unnecessary Abstraction** | 2 | `asyncexitstack.py` (18 lines, 1 class, single consumer `applications.py` — inline candidate). `forward_reference_type.py` (9 lines, test fixture — deliberate). |
 | **Stable Core** | 4 modules | `sse.py`, `concurrency.py`, `cli.py`, `asyncexitstack.py` — all freq=1, high fan-in. Guard from churn. |
 | **Pass-Through** | 9 edges | Active core imports dormant data layer (params, models, encoders) but 0% co-change between them. Data schemas are stable intermediaries. |
 | **Fragile Boundary** | 0 | None detected — FastAPI's boundaries are healthy. |
@@ -132,7 +132,7 @@ graph LR
 
 **4. Single-Consumer Wrappers (severity 0.40)**
 
-`asyncexitstack.py` (18 lines, 1 class) is only consumed by `applications.py`. This is a classic over-engineering signal: a tiny wrapper that could be inlined. The `forward_reference_type.py` case is a deliberate test fixture — correctly flagged but low priority.
+`asyncexitstack.py` (18 lines, 1 class) is only consumed by `applications.py`. This is a classic unnecessary abstraction signal: a tiny wrapper that could be inlined. The `forward_reference_type.py` case is a deliberate test fixture — correctly flagged but low priority.
 
 ## Caveats
 
@@ -164,9 +164,9 @@ Large commits (merge commits, bulk renames, CI config changes) inflate co-change
 - Proportional weighting: `1/num_files_in_commit` per co-change pair
 - Exclude merge commits by default
 
-### 4. Over-Engineering False Positives in Intentional Architecture
+### 4. Unnecessary Abstraction False Positives in Intentional Architecture
 
-The over-engineering signal flags stable abstractions that exist for good architectural reasons:
+The unnecessary abstraction signal flags stable abstractions that exist for good architectural reasons:
 - Re-export modules (`__init__.py`, `index.ts`) — already filtered
 - Dependency injection interfaces — rarely change but exist for testability
 - Protocol/trait definitions — used by many but never co-change with implementors
@@ -236,15 +236,15 @@ Tree-sitter parsing doesn't fully resolve imports:
 |-------------|--------|--------|
 | **Benchmark suite** — run Ising on 5+ well-known OSS repos (Django, Express, Tokio, etc.) | Validates signal accuracy across ecosystems | Medium |
 | **Ground truth comparison** — compare ghost coupling findings against actual bug-fix PRs | Proves the "hidden dependency" thesis empirically | High |
-| **Signal precision/recall** — for over-engineering, manually label true/false positives in 3 repos | Tunes thresholds with data, not intuition | Medium |
+| **Signal precision/recall** — for unnecessary abstraction, manually label true/false positives in 3 repos | Tunes thresholds with data, not intuition | Medium |
 
 ## Test
 
 - [x] Ising `build` completes on FastAPI without errors
 - [x] Ghost coupling detected between `routing.py` and `_compat/__init__.py`
-- [x] Over-engineering correctly identifies `asyncexitstack.py` as inline candidate
+- [x] Unnecessary abstraction correctly identifies `asyncexitstack.py` as inline candidate
 - [x] Stable core correctly identifies low-churn, high-fan-in modules
-- [x] Pass-through pattern detected via over-engineering signal variant
+- [x] Pass-through pattern detected via unnecessary abstraction signal variant
 - [x] No false fragile_boundary or ticking_bomb signals (no defect data)
 - [ ] Temporal decay weighting improves signal stability across different `--since` windows
 - [ ] Heuristic defect layer enables fragile_boundary detection on at least 1 real repo

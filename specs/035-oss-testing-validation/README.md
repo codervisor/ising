@@ -51,7 +51,7 @@ Ran Ising against 6 notable open-source repositories spanning JS, Python, Rust, 
 
 ### Flask-Admin (Python, 919 nodes)
 
-- Best signal output: 3 dependency cycles, 4 god modules, 23 ghost couplings, 26 over-engineering, 1 shotgun surgery.
+- Best signal output: 3 dependency cycles, 4 god modules, 23 ghost couplings, 26 unnecessary abstraction, 1 shotgun surgery.
 - 45 co-change edges from 64 commits -- only repo where co-change reliably produced data.
 - `flask_admin/model/base.py` and `contrib/sqla/view.py` correctly identified as god modules.
 - **Sweet spot** for Ising: medium-sized Python project with enough churn.
@@ -60,7 +60,7 @@ Ran Ising against 6 notable open-source repositories spanning JS, Python, Rust, 
 
 - 4 critical, 4 danger (3%). Reasonable for well-structured Rust.
 - 1 real dependency cycle (`method_routing.rs <-> mod.rs`).
-- 5 over-engineering signals are **false positives** -- Rust `mod` declarations from `lib.rs` are idiomatic, not single-consumer wrappers.
+- 5 unnecessary abstraction signals are **false positives** -- Rust `mod` declarations from `lib.rs` are idiomatic, not single-consumer wrappers.
 - 28 stable_core signals with fan-in=1 -- threshold too low for large codebase.
 - Only 1 co-change edge from 111 commits.
 
@@ -94,7 +94,7 @@ Ran Ising against 6 notable open-source repositories spanning JS, Python, Rust, 
 
 ### P2 -- Medium
 
-**GAP-5: Rust false over-engineering signals.** `lib.rs -> macros.rs` flagged as "consider inlining." Rust `mod` declarations are idiomatic. Fix: skip over-engineering for `lib.rs`/`main.rs` mod declarations.
+**GAP-5: Rust false unnecessary abstraction signals.** `lib.rs -> macros.rs` flagged as "consider inlining." Rust `mod` declarations are idiomatic. Fix: skip unnecessary abstraction for `lib.rs`/`main.rs` mod declarations.
 
 **GAP-6: Stable core threshold too low.** Axum: 28 stable_core signals with fan-in=1 in a 2,251-node codebase. Fix: scale fan-in threshold relative to codebase size (minimum fan-in >= 5, or top 5% percentile).
 
@@ -138,7 +138,7 @@ Ran Ising against 6 notable open-source repositories spanning JS, Python, Rust, 
 | GodModule | 0 | 0 | 4 | 0 | 0 | 0 | 4 |
 | GhostCoupling | 0 | 0 | 23 | 0 | 0 | 57 | 80 |
 | ShotgunSurgery | 0 | 0 | 1 | 0 | 0 | 10 | 11 |
-| OverEngineering | 0 | 0 | 26 | 5 | 0 | 0 | 31 |
+| UnnecessaryAbstraction | 0 | 0 | 26 | 5 | 0 | 0 | 31 |
 | StableCore | 0 | 3 | 10 | 28 | 0 | 0 | 41 |
 | **Total** | **0** | **4** | **67** | **34** | **0** | **67** | **172** |
 
@@ -152,3 +152,40 @@ Ran Ising against 6 notable open-source repositories spanning JS, Python, Rust, 
 | Axum | routing/mod.rs | routing/method_routing.rs | extract/ws.rs |
 | Redis | vector-sets/test.py | req-res-log-validator.py | tests/with.py |
 | React | fiber/renderer.js | ReactFizzConfigDOM.js | ReactFiberCommitWork.js |
+
+## Proposed Extended Test Matrix
+
+Express and Flask produced zero signals — they're too mature and low-churn for meaningful validation. We keep them as baselines but add more actively maintained repos that better exercise Ising's signal detection.
+
+### Criteria for selection
+
+- Medium-to-large codebase (500–15K+ nodes)
+- Active development with frequent PRs (likely to produce co-change edges)
+- Languages already supported by Ising (Python, JS/TS, Rust, Go)
+- Mix of well-structured and organically-grown codebases
+
+### Proposed additions
+
+| Repository | Language | Est. Size | Why it fits |
+|---|---|---|---|
+| **openclaw/openclaw** | TypeScript | Large | Very active AI assistant project, rapid iteration, likely high co-change density and shotgun surgery signals |
+| **langchain-ai/langchain** | Python | Very Large | Extremely active, frequent refactors, large contributor base — likely god modules, ghost couplings, dependency cycles |
+| **pydantic/pydantic** | Python | Medium | Core validation library with tight coupling patterns, good test for propagation accuracy |
+| **astral-sh/ruff** | Rust | Large | Fast-moving Rust linter, good test for Rust parsing at scale, complements Axum |
+| **vercel/next.js** | JS/TS | Very Large | Massive monorepo, complex build system, likely rich signal output across all signal types |
+| **gin-gonic/gin** | Go | Medium | Popular Go web framework, tests Go language support end-to-end |
+| **fastapi/fastapi** | Python | Medium | Active web framework, known tight coupling between router/dependency injection — good for ghost coupling detection |
+| **denoland/fresh** | TypeScript | Medium | Active web framework, good TS coverage, island architecture may trigger interesting structural signals |
+
+### Rationale for keeping Express/Flask
+
+Express and Flask serve as **negative baselines** — well-structured, mature repos where zero signals is the expected result. This validates that Ising doesn't over-flag stable codebases. Redis is kept to track C language support progress.
+
+### Priority for next validation round
+
+1. **langchain-ai/langchain** — highest expected signal density (Python, very large, rapid churn)
+2. **openclaw/openclaw** — user-requested, active TS project
+3. **vercel/next.js** — stress-tests scalability and multi-language (JS+TS)
+4. **astral-sh/ruff** — validates Rust parsing at scale
+5. **gin-gonic/gin** — validates Go support
+6. **pydantic/pydantic**, **fastapi/fastapi**, **denoland/fresh** — secondary targets

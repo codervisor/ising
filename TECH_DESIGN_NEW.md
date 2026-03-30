@@ -370,10 +370,10 @@ Meaning: A depends on B, they change together, AND changes to A cause bugs in B.
 
 **Priority**: Critical. This is where the Agent should be most careful.
 
-**Signal 3: Over-Engineering**
+**Signal 3: Unnecessary Abstraction**
 
 ```
-over_engineering(A, B) =
+unnecessary_abstraction(A, B) =
     structural_edge(A, B) == True  AND
     temporal_coupling(A, B) < 0.05  AND
     fault_propagation(A, B) == 0
@@ -439,12 +439,12 @@ fn detect_signals(
         }
     }
     
-    // Over-Engineering: structural edges with no temporal activity
+    // Unnecessary Abstraction: structural edges with no temporal activity
     for (a, b) in structural.edges_of_type(EdgeType::Imports) {
         let coupling = change.edge_weight(a, b, EdgeType::CoChanges).unwrap_or(0.0);
         let f_prop = defect.edge_weight(a, b, EdgeType::FaultPropagates).unwrap_or(0.0);
         if coupling < 0.05 && f_prop == 0.0 {
-            signals.push(Signal::new(SignalType::OverEngineering, a, Some(b), 0.3));
+            signals.push(Signal::new(SignalType::UnnecessaryAbstraction, a, Some(b), 0.3));
         }
     }
     

@@ -66,7 +66,7 @@ Cross-layer anomalies detected in `ising-analysis/src/signals.rs`:
 - **GodModule** -- extreme complexity + fan-out
 - **UnstableDependency** -- stable module depends on volatile one
 - **StableCore** -- high fan-in, low change, protect it
-- **OverEngineering** -- structural dep exists but files never co-change
+- **UnnecessaryAbstraction** -- structural dep exists but files never co-change
 
 ## Conventions
 

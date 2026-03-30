@@ -120,7 +120,7 @@ Used by MCP tools. Agents receive this and decide what to include in their conte
     "ticking_bomb": 2,
     "fragile_boundary": 5,
     "ghost_coupling": 8,
-    "over_engineering": 3,
+    "unnecessary_abstraction": 3,
     "stable_core": 10
   },
   "signals": [

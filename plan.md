@@ -107,7 +107,7 @@ New crate with:
 New crate with:
 
 **`src/signals.rs`** — Cross-layer signal detection:
-- `SignalType` enum: GhostCoupling, FragileBoundary, OverEngineering, StableCore, TickingBomb
+- `SignalType` enum: GhostCoupling, FragileBoundary, UnnecessaryAbstraction, StableCore, TickingBomb
 - `Signal` struct: type, node_a, node_b (optional), severity, details
 - `detect_signals(structural, change)` — implements signal logic from Section 6
 - Percentile computation helpers for node-level thresholds
@@ -153,7 +153,7 @@ min_coupling = 0.3
 ghost_coupling_threshold = 0.5
 fragile_boundary_coupling = 0.3
 fragile_boundary_fault_prop = 0.1
-over_engineering_coupling = 0.05
+unnecessary_abstraction_coupling = 0.05
 
 [percentiles]
 stable_core_freq = 10

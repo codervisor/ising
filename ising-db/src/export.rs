@@ -98,7 +98,7 @@ impl Database {
                 let style = match signal.signal_type.as_str() {
                     "ghost_coupling" => "style=dashed, color=purple",
                     "fragile_boundary" => "style=bold, color=red",
-                    "over_engineering" => "style=dotted, color=gray",
+                    "unnecessary_abstraction" => "style=dotted, color=gray",
                     _ => "color=black",
                 };
                 out.push_str(&format!(
