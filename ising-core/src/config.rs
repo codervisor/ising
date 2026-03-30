@@ -52,7 +52,10 @@ pub struct ThresholdConfig {
     #[serde(default = "default_fragile_fault")]
     pub fragile_boundary_fault_prop: f64,
     /// Max coupling for unnecessary abstraction signal.
-    #[serde(default = "default_unnecessary_abstraction", alias = "over_engineering_coupling")]
+    #[serde(
+        default = "default_unnecessary_abstraction",
+        alias = "over_engineering_coupling"
+    )]
     pub unnecessary_abstraction_coupling: f64,
     /// Minimum complexity for god module signal.
     #[serde(default = "default_god_module_complexity")]
