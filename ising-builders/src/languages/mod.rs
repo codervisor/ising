@@ -11,6 +11,12 @@ pub mod rust_lang;
 pub mod typescript;
 pub mod vue;
 
+pub mod c_lang;
+pub mod cpp;
+pub mod kotlin;
+pub mod php;
+pub mod ruby;
+
 /// Result of analyzing a single file.
 #[derive(Debug)]
 pub struct FileAnalysis {

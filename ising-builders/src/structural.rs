@@ -86,15 +86,17 @@ pub fn build_structural_graph(
     // suffixes so we can resolve namespace imports to actual project files.
     // Only built when the repo actually contains Java or C# files to avoid overhead on
     // Python/JS/Rust/Go-only repos.
-    let has_jvm_or_csharp = module_ids
-        .iter()
-        .any(|id| id.ends_with(".java") || id.ends_with(".cs"));
+    let has_jvm_or_csharp = module_ids.iter().any(|id| {
+        id.ends_with(".java") || id.ends_with(".cs") || id.ends_with(".kt") || id.ends_with(".php")
+    });
     let suffix_index: std::collections::HashMap<&str, Vec<&str>> = if has_jvm_or_csharp {
         let mut map: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
-        for id in module_ids
-            .iter()
-            .filter(|id| id.ends_with(".java") || id.ends_with(".cs"))
-        {
+        for id in module_ids.iter().filter(|id| {
+            id.ends_with(".java")
+                || id.ends_with(".cs")
+                || id.ends_with(".kt")
+                || id.ends_with(".php")
+        }) {
             // Index each slash-delimited suffix of the path
             let mut start = 0;
             while let Some(pos) = id[start..].find('/') {
@@ -137,7 +139,11 @@ pub fn build_structural_graph(
                             graph.add_edge(&result.module_id, target_id, EdgeType::Imports, 1.0);
                     }
                 }
-            } else if imp.source.ends_with(".java") || imp.source.ends_with(".cs") {
+            } else if imp.source.ends_with(".java")
+                || imp.source.ends_with(".cs")
+                || imp.source.ends_with(".kt")
+                || imp.source.ends_with(".php")
+            {
                 // Java/C# namespace imports produce paths like `com/example/Foo.java` that
                 // don't match Maven/project paths (`src/main/java/com/example/Foo.java`).
                 // Use suffix matching: find any module whose path ends with `/{import_path}`.
@@ -301,6 +307,60 @@ fn analyze_file(
                             &mut imports,
                         );
                     }
+                    Language::Php => {
+                        languages::php::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            repo_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::Ruby => {
+                        languages::ruby::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            repo_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::Kotlin => {
+                        languages::kotlin::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::C => {
+                        languages::c_lang::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            repo_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
+                    Language::Cpp => {
+                        languages::cpp::extract_nodes(
+                            root,
+                            &source,
+                            &relative_path,
+                            repo_path,
+                            &mut functions,
+                            &mut classes,
+                            &mut imports,
+                        );
+                    }
                     Language::Vue => unreachable!(), // Handled above
                 }
             }
@@ -347,6 +407,11 @@ fn get_tree_sitter_language(lang: Language, file_path: &Path) -> Option<tree_sit
         Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
         Language::Java => Some(tree_sitter_java::LANGUAGE.into()),
         Language::CSharp => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+        Language::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+        Language::Ruby => Some(tree_sitter_ruby::LANGUAGE.into()),
+        Language::Kotlin => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
+        Language::C => Some(tree_sitter_c::LANGUAGE.into()),
+        Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
         Language::Vue => None, // Vue uses its own two-pass parsing
     }
 }

@@ -84,4 +84,4 @@ Cross-layer anomalies detected in `ising-analysis/src/signals.rs`:
 4. Add `Language` variant and extension mapping in `ising-builders/src/common.rs`
 5. Add tree-sitter dispatch in `ising-builders/src/structural.rs` (both `get_tree_sitter_language` and extract match)
 
-**Supported languages**: Python, TypeScript, JavaScript, Rust, Go, Vue, Java, C#
+**Supported languages**: Python, TypeScript, JavaScript, Rust, Go, Vue, Java, C#, PHP, Ruby, Kotlin, C, C++

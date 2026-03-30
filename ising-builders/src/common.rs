@@ -16,6 +16,11 @@ pub enum Language {
     Vue,
     Java,
     CSharp,
+    Php,
+    Ruby,
+    Kotlin,
+    C,
+    Cpp,
 }
 
 impl Language {
@@ -30,6 +35,11 @@ impl Language {
             "vue" => Some(Language::Vue),
             "java" => Some(Language::Java),
             "cs" | "csx" => Some(Language::CSharp),
+            "php" => Some(Language::Php),
+            "rb" => Some(Language::Ruby),
+            "kt" | "kts" => Some(Language::Kotlin),
+            "c" => Some(Language::C),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h" => Some(Language::Cpp),
             _ => None,
         }
     }
@@ -58,13 +68,19 @@ impl Language {
             Language::Vue => "vue",
             Language::Java => "java",
             Language::CSharp => "csharp",
+            Language::Php => "php",
+            Language::Ruby => "ruby",
+            Language::Kotlin => "kotlin",
+            Language::C => "c",
+            Language::Cpp => "cpp",
         }
     }
 
     /// All supported file extensions.
     pub fn supported_extensions() -> &'static [&'static str] {
         &[
-            "py", "ts", "tsx", "js", "jsx", "rs", "go", "vue", "java", "cs", "csx",
+            "py", "ts", "tsx", "js", "jsx", "rs", "go", "vue", "java", "cs", "csx", "php", "rb",
+            "kt", "kts", "c", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "h",
         ]
     }
 }
@@ -82,6 +98,13 @@ mod tests {
         assert_eq!(Language::from_extension("vue"), Some(Language::Vue));
         assert_eq!(Language::from_extension("java"), Some(Language::Java));
         assert_eq!(Language::from_extension("cs"), Some(Language::CSharp));
+        assert_eq!(Language::from_extension("php"), Some(Language::Php));
+        assert_eq!(Language::from_extension("rb"), Some(Language::Ruby));
+        assert_eq!(Language::from_extension("kt"), Some(Language::Kotlin));
+        assert_eq!(Language::from_extension("c"), Some(Language::C));
+        assert_eq!(Language::from_extension("cpp"), Some(Language::Cpp));
+        assert_eq!(Language::from_extension("h"), Some(Language::Cpp));
+        assert_eq!(Language::from_extension("hpp"), Some(Language::Cpp));
         assert_eq!(Language::from_extension("md"), None);
     }
 
