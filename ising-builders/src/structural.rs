@@ -82,11 +82,19 @@ pub fn build_structural_graph(
 
     // Build a suffix index for Java/C# imports: the namespace-to-path conversion produces
     // a relative path like `com/example/Foo.java` that doesn't match Maven/project paths
-    // like `src/main/java/com/example/Foo.java`. We index each module_id by its suffixes
-    // so we can resolve namespace imports to actual project files.
-    let suffix_index: std::collections::HashMap<&str, Vec<&str>> = {
+    // like `src/main/java/com/example/Foo.java`. We index each .java/.cs module_id by its
+    // suffixes so we can resolve namespace imports to actual project files.
+    // Only built when the repo actually contains Java or C# files to avoid overhead on
+    // Python/JS/Rust/Go-only repos.
+    let has_jvm_or_csharp = module_ids
+        .iter()
+        .any(|id| id.ends_with(".java") || id.ends_with(".cs"));
+    let suffix_index: std::collections::HashMap<&str, Vec<&str>> = if has_jvm_or_csharp {
         let mut map: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
-        for id in &module_ids {
+        for id in module_ids
+            .iter()
+            .filter(|id| id.ends_with(".java") || id.ends_with(".cs"))
+        {
             // Index each slash-delimited suffix of the path
             let mut start = 0;
             while let Some(pos) = id[start..].find('/') {
@@ -98,6 +106,8 @@ pub fn build_structural_graph(
             }
         }
         map
+    } else {
+        std::collections::HashMap::new()
     };
 
     for result in &file_results {
