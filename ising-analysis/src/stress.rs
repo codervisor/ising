@@ -267,8 +267,19 @@ fn compute_risk_field_with_loads(
         let change_load = local_loads.get(node_id).copied().unwrap_or(0.0);
         let capacity = capacities.get(node_id).copied().unwrap_or(1.0);
         let structural_weight = structural_weights.get(node_id).copied().unwrap_or(0.0);
-        let total_risk = propagated.get(node_id).copied().unwrap_or(change_load);
-        let propagated_risk = total_risk - change_load;
+        let raw_total = propagated.get(node_id).copied().unwrap_or(change_load);
+        let raw_propagated = raw_total - change_load;
+
+        // GAP-3: Attenuate propagated risk for modules with zero/near-zero change load.
+        // Re-export modules (e.g. __init__.py) absorb risk purely from neighbors,
+        // which over-amplifies their criticality. Scale down propagated risk by
+        // structural_weight so lightweight pass-through modules aren't over-flagged.
+        let propagated_risk = if change_load < 0.01 {
+            raw_propagated * structural_weight.max(0.1)
+        } else {
+            raw_propagated
+        };
+        let total_risk = change_load + propagated_risk;
 
         let safety_factor = (capacity / total_risk.max(DIV_EPSILON)).min(MAX_SAFETY_FACTOR);
         let zone = SafetyZone::from_factor(safety_factor);

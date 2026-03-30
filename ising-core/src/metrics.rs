@@ -25,6 +25,8 @@ pub struct GraphMetrics {
     pub change_edges: usize,
     pub defect_edges: usize,
     pub cycle_count: usize,
+    /// Fraction of modules that participate in at least one co-change edge [0.0, 1.0].
+    pub cochange_coverage: f64,
 }
 
 /// Compute fan-in and fan-out for a node (structural edges only).
@@ -86,6 +88,20 @@ pub fn compute_graph_metrics(graph: &UnifiedGraph) -> GraphMetrics {
         .filter(|scc: &&Vec<petgraph::graph::NodeIndex>| scc.len() > 1)
         .count();
 
+    // Compute co-change coverage: fraction of modules with at least one co-change edge
+    let module_count = graph.node_count();
+    let cochange_coverage = if module_count > 0 {
+        let change_edge_list = graph.edges_in_layer(EdgeLayer::Change);
+        let mut connected: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (src, tgt, _) in &change_edge_list {
+            connected.insert(src);
+            connected.insert(tgt);
+        }
+        connected.len() as f64 / module_count as f64
+    } else {
+        0.0
+    };
+
     GraphMetrics {
         total_nodes: graph.node_count(),
         total_edges: graph.edge_count(),
@@ -93,6 +109,7 @@ pub fn compute_graph_metrics(graph: &UnifiedGraph) -> GraphMetrics {
         change_edges,
         defect_edges,
         cycle_count,
+        cochange_coverage,
     }
 }
 

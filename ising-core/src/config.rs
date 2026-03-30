@@ -148,10 +148,10 @@ fn default_max_files_per_commit() -> u32 {
     50
 }
 fn default_min_co_changes() -> u32 {
-    5
+    3
 }
 fn default_min_coupling() -> f64 {
-    0.3
+    0.15
 }
 fn default_ghost_coupling() -> f64 {
     0.5
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.thresholds.min_co_changes, 5);
+        assert_eq!(config.thresholds.min_co_changes, 3);
         assert_eq!(config.thresholds.ghost_coupling_threshold, 0.5);
         assert_eq!(config.build.time_window, "6 months ago");
     }
@@ -275,7 +275,7 @@ min_co_changes = 10
         assert_eq!(config.build.time_window, "3 months ago");
         assert_eq!(config.thresholds.min_co_changes, 10);
         // Defaults for unspecified fields
-        assert_eq!(config.thresholds.min_coupling, 0.3);
+        assert_eq!(config.thresholds.min_coupling, 0.15);
     }
 
     #[test]

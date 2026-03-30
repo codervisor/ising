@@ -5,6 +5,7 @@ use ising_analysis::stress;
 use ising_core::config::Config;
 use ising_core::fea::{LoadCase, SafetyZone};
 use ising_core::metrics::compute_graph_metrics;
+use ising_core::path_utils::is_test_file;
 use ising_db::Database;
 use std::path::PathBuf;
 
@@ -69,6 +70,9 @@ struct HotspotsArgs {
     /// Number of top hotspots to show
     #[arg(long, default_value = "20")]
     top: usize,
+    /// Exclude test files from results
+    #[arg(long)]
+    exclude_tests: bool,
     /// Database file path
     #[arg(long, default_value = "ising.db")]
     db: PathBuf,
@@ -127,9 +131,12 @@ struct SafetyArgs {
     /// Number of top results to show
     #[arg(long, default_value = "20")]
     top: usize,
-    /// Filter by safety zone (critical, danger, warning, healthy, over_engineered)
+    /// Filter by safety zone (critical, danger, warning, healthy, stable)
     #[arg(long)]
     zone: Option<String>,
+    /// Exclude test files from results
+    #[arg(long)]
+    exclude_tests: bool,
     /// Database file path
     #[arg(long, default_value = "ising.db")]
     db: PathBuf,
@@ -270,7 +277,11 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     eprintln!("Build complete:");
     eprintln!("  Nodes:            {}", metrics.total_nodes);
     eprintln!("  Structural edges: {}", metrics.structural_edges);
-    eprintln!("  Change edges:     {}", metrics.change_edges);
+    eprintln!(
+        "  Change edges:     {} ({:.0}% module coverage)",
+        metrics.change_edges,
+        metrics.cochange_coverage * 100.0
+    );
     eprintln!("  Defect edges:     {}", metrics.defect_edges);
     eprintln!("  Cycles:           {}", metrics.cycle_count);
     eprintln!("  Signals:          {}", signals.len());
@@ -282,6 +293,17 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
         risk_field.converged,
         risk_field.iterations,
     );
+
+    if metrics.cochange_coverage < 0.10 && metrics.total_nodes > 50 {
+        eprintln!();
+        eprintln!(
+            "  ⚠ Low co-change coverage ({:.0}%). Signals depending on temporal data may be sparse.",
+            metrics.cochange_coverage * 100.0
+        );
+        eprintln!(
+            "    Try: increase --depth, widen time_window, or lower min_co_changes in config."
+        );
+    }
 
     if !signals.is_empty() {
         eprintln!();
@@ -358,7 +380,10 @@ fn cmd_impact(args: ImpactArgs) -> Result<i32> {
 
 fn cmd_hotspots(args: HotspotsArgs) -> Result<i32> {
     let db = Database::open(args.db.to_str().unwrap_or("ising.db"))?;
-    let hotspots = db.get_hotspots(args.top)?;
+    let mut hotspots = db.get_hotspots(args.top)?;
+    if args.exclude_tests {
+        hotspots.retain(|(id, _, _, _)| !is_test_file(id));
+    }
 
     match args.format {
         OutputFormat::Json => {
@@ -481,6 +506,9 @@ fn cmd_safety(args: SafetyArgs) -> Result<i32> {
     } else {
         db.get_safety_ranking(args.top)?
     };
+    if args.exclude_tests {
+        results.retain(|r| !is_test_file(&r.node_id));
+    }
     results.truncate(args.top);
 
     if results.is_empty() {
@@ -506,14 +534,20 @@ fn cmd_safety(args: SafetyArgs) -> Result<i32> {
             );
             println!("{}", "─".repeat(80));
             for (i, s) in results.iter().enumerate() {
+                let test_tag = if is_test_file(&s.node_id) {
+                    " [TEST]"
+                } else {
+                    ""
+                };
                 println!(
-                    "  {:>4}  {:<45} {:>6.2} {:>5.2} {:>6.2} {:>10}",
+                    "  {:>4}  {:<45} {:>6.2} {:>5.2} {:>6.2} {:>10}{}",
                     i + 1,
                     truncate_path(&s.node_id, 45),
                     s.risk_score,
                     s.capacity,
                     s.safety_factor,
                     s.zone.to_uppercase(),
+                    test_tag,
                 );
             }
         }
