@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Renamed `OverEngineering` signal to `UnnecessaryAbstraction` for clarity — the old name was confused with the `SafetyZone::Stable` rename
+
 ## [0.1.0] - 2026-03-27
 
 Initial release of `@codervisor/ising-cli`.
@@ -23,7 +27,7 @@ Initial release of `@codervisor/ising-cli`.
 **Cross-layer signals**
 - `GhostCoupling` — hidden dependency: high temporal coupling with no structural link
 - `FragileBoundary` — broken interface: structural dep + high co-change + fault propagation
-- `OverEngineering` — unnecessary abstraction: structural dep with no co-change evidence
+- `UnnecessaryAbstraction` — structural dep with no co-change evidence
 - `StableCore` — reliable foundation: high fan-in, low churn, low defects
 - `TickingBomb` — most dangerous code: high hotspot + high defects + high coupling
 - `DependencyCycle` — circular dependency between modules

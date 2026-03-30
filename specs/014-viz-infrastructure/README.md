@@ -194,7 +194,7 @@ For repos with 8+ modules, fall back to `d3.schemeTableau10`.
 | `ticking_bomb`     | `#dc2626` | `#dc262633`            |
 | `fragile_boundary` | `#ef4444` | `#ef444433`            |
 | `ghost_coupling`   | `#f59e0b` | `#f59e0b33`            |
-| `over_engineering`  | `#6b7280` | `#6b728033`            |
+| `unnecessary_abstraction`  | `#6b7280` | `#6b728033`            |
 | `stable_core`      | `#10b981` | `#10b98133`            |
 
 **Layer edge styles**:

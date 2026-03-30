@@ -51,9 +51,9 @@ pub struct ThresholdConfig {
     /// Fault propagation threshold for fragile boundary.
     #[serde(default = "default_fragile_fault")]
     pub fragile_boundary_fault_prop: f64,
-    /// Max coupling for over-engineering signal.
-    #[serde(default = "default_over_engineering")]
-    pub over_engineering_coupling: f64,
+    /// Max coupling for unnecessary abstraction signal.
+    #[serde(default = "default_unnecessary_abstraction")]
+    pub unnecessary_abstraction_coupling: f64,
     /// Minimum complexity for god module signal.
     #[serde(default = "default_god_module_complexity")]
     pub god_module_complexity: u32,
@@ -159,7 +159,7 @@ fn default_fragile_coupling() -> f64 {
 fn default_fragile_fault() -> f64 {
     0.1
 }
-fn default_over_engineering() -> f64 {
+fn default_unnecessary_abstraction() -> f64 {
     0.05
 }
 fn default_god_module_complexity() -> u32 {
@@ -206,7 +206,7 @@ impl Default for ThresholdConfig {
             ghost_coupling_threshold: default_ghost_coupling(),
             fragile_boundary_coupling: default_fragile_coupling(),
             fragile_boundary_fault_prop: default_fragile_fault(),
-            over_engineering_coupling: default_over_engineering(),
+            unnecessary_abstraction_coupling: default_unnecessary_abstraction(),
             god_module_complexity: default_god_module_complexity(),
             god_module_loc: default_god_module_loc(),
             god_module_fan_out: default_god_module_fan_out(),

@@ -76,7 +76,7 @@ Displayed below V8 in the right sidebar. Vertical scrollable list grouped by sig
 1. `ticking_bomb` — bomb icon
 2. `fragile_boundary` — lightning icon
 3. `ghost_coupling` — ghost icon
-4. `over_engineering` — wrench icon
+4. `unnecessary_abstraction` — wrench icon
 5. `stable_core` — shield icon
 
 **Card Layout** (per signal):

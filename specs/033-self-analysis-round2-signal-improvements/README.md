@@ -41,7 +41,7 @@ A second self-analysis run (after adding Go support in spec 024) surfaced four a
 - [ ] \`main.rs\` shrinks from ~595 to ~480 lines with no logic loss
 
 ### 3. Decompose \`detect_signals\` into per-detector functions
-- [ ] Extract each signal type into its own private function: \`detect_ghost_coupling\`, \`detect_fragile_boundaries\`, \`detect_over_engineering\`, \`detect_stable_cores\`, \`detect_ticking_bombs\`, \`detect_dependency_cycles\`, \`detect_god_modules\`, \`detect_shotgun_surgery\`, \`detect_unstable_dependencies\`
+- [ ] Extract each signal type into its own private function: \`detect_ghost_coupling\`, \`detect_fragile_boundaries\`, \`detect_unnecessary_abstraction\`, \`detect_stable_cores\`, \`detect_ticking_bombs\`, \`detect_dependency_cycles\`, \`detect_god_modules\`, \`detect_shotgun_surgery\`, \`detect_unstable_dependencies\`
 - [ ] \`detect_signals\` becomes a thin dispatcher calling each in sequence
 - [ ] Add at least one isolated unit test per detector function
 - [ ] \`signals.rs\` complexity drops from 128 to <20 per function (it is the #1 hotspot at score 0.83 with 10 changes in 26 commits)
@@ -56,7 +56,7 @@ A second self-analysis run (after adding Go support in spec 024) surfaced four a
 
 - Changing threshold values for existing signals
 - Adding new signal types beyond the four listed
-- Addressing the ghost coupling / over-engineering false positives from spec 023 (handled there)
+- Addressing the ghost coupling / unnecessary abstraction false positives from spec 023 (handled there)
 
 ## Technical Notes
 
