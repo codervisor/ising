@@ -1,28 +1,50 @@
 # Ising
 
-## 🧭 Project Context
+## Project Context
 
-**Ising** is a maintainability analysis tool for growing software projects. It uses spectral graph theory and concepts from statistical physics (the Ising Model) to analyze code dependency graphs and surface actionable code quality improvements.
+**Ising** is a code maintainability analysis engine. It builds a multi-layer dependency graph from source code and git history, computes per-module risk scores and safety factors, detects cross-layer anomalies (signals), and serves results via CLI and HTTP/MCP server.
 
-### Positioning
+### What It Does
 
-- **Goal**: Help teams ensure maintainability of growing codebases and identify concrete code quality improvements before technical debt compounds.
-- **Not**: An AI agent, a linter, or an IDE plugin. Ising is an analysis engine that quantifies architectural health.
-- **Mechanism**: SCIP-based code indexing → dependency graph construction → spectral analysis (λ_max, modularity Q) → health scoring.
+1. **Builds a graph** from source code (Tree-sitter) and git history (gix) with three layers: structural, change, defect
+2. **Computes risk** for every module: how much change pressure it faces vs. how much it can absorb
+3. **Detects signals** like ghost coupling, dependency cycles, god modules
+4. **Simulates changes** to predict blast radius before code is written
+5. **Serves results** to AI coding agents via MCP tools
 
 ### Key Concepts
 
 | Concept | Meaning |
 |---|---|
-| **λ_max (spectral radius)** | Measures change propagation risk. λ < 1 = stable, λ > 1 = fragile. |
-| **Modularity Q** | Measures how well code separates into independent modules. Low Q = "Big Ball of Mud." |
-| **SCIP indexing** | Language-agnostic batch extraction of symbols and references from source code. |
-| **IsingGraph** | Our core graph model wrapping petgraph — symbols as nodes, dependencies as edges. |
+| **Safety Factor (SF)** | `capacity / risk_score`. The primary health metric. SF < 1.0 = critical. |
+| **Capacity** | Module resilience: inverse of complexity + instability + coupling. Range [0.05, 1.0]. |
+| **Risk Score** | Change load + propagated risk from neighbors. |
+| **Safety Zone** | Classification: Critical, Danger, Warning, Healthy, Stable. |
+| **Signal** | Cross-layer anomaly (e.g., ghost coupling = files co-change without structural dependency). |
 
 ### Architecture
 
-- **`ising-core/`**: Rust crate with `graph` module (IsingGraph, Symbol types) and `physics` module (spectral analysis, health scoring).
-- **Build/Test**: `cargo build` and `cargo test` from workspace root.
+```
+ising-core/       Types, config, graph model, metrics
+ising-builders/   Graph construction (Tree-sitter + git)
+ising-analysis/   Risk computation, signals, hotspots
+ising-db/         SQLite persistence and queries
+ising-cli/        CLI: build, safety, simulate, signals, hotspots, serve
+ising-server/     HTTP/MCP server for AI agent integration
+ising-scip/       SCIP index loader (alternative to Tree-sitter)
+```
+
+### CLI Commands
+
+```bash
+ising build --repo-path <path>        # Build graph + compute risk
+ising safety --top 20                 # View riskiest modules
+ising safety --zone critical          # Filter by zone
+ising simulate <file>                 # Predict blast radius of a change
+ising signals                         # View cross-layer anomalies
+ising hotspots --top 20               # View change hotspots
+ising serve --port 8080               # Start MCP server
+```
 
 ## Skills
 
@@ -30,144 +52,43 @@ This project uses [forge](https://github.com/codervisor/forge) skills:
 
 | Skill | Description |
 |-------|-------------|
-| `leanspec-sdd` | Spec-Driven Development — plan before you code |
+| `leanspec-sdd` | Spec-Driven Development -- plan before you code |
 | `rust-npm-publish` | Distribute Rust binaries via npm platform packages |
 | `hybrid-ci` | CI/CD for Rust+Node.js with GitHub Actions |
 | `monorepo-version-sync` | Coordinated versioning across packages and languages |
 
 ## Conventions
 
-- **Version source of truth**: Root `package.json` — never edit versions elsewhere directly
+- **Version source of truth**: Root `package.json`
 - **Workspace protocol**: Use `workspace:*` for internal deps during development
 - **Specs first**: Create a spec before starting non-trivial work
-- **CI must pass**: All PRs require passing CI (Node + Rust checks)
+- **CI must pass**: All PRs require passing CI
+- **Testing**: `cargo test --workspace` must pass. Unit tests alongside modules.
+- **Formatting**: `cargo fmt` and `cargo clippy` must be clean.
 
-### Roadmap
+## Implementation Guidelines
 
-| Phase | Spec | Status |
-|---|---|---|
-| Spectral engine | 001-rust-core | in-progress |
-| SCIP index loading | 002-scip-loader | planned |
-| Containerized workers | 003-container-workers | planned |
+- **Maintainability is our product** -- our own code must exemplify what we preach
+- **Portable builds** -- pure Rust preferred, avoid external C library dependencies
+- **Workspace conventions** -- shared deps in root `Cargo.toml` via `[workspace.dependencies]`
 
----
+## Spec Management
 
-## 🚨 CRITICAL: Before ANY Task
+Use `lean-spec` CLI or MCP tools for spec management:
 
-**STOP and check these first:**
+| Action | Command |
+|--------|---------|
+| Project status | `lean-spec board` |
+| List specs | `lean-spec list` |
+| Search specs | `lean-spec search "query"` |
+| View spec | `lean-spec view <spec>` |
+| Create spec | `lean-spec create <name>` |
+| Update spec | `lean-spec update <spec> --status <status>` |
+| Validate | `lean-spec validate` |
 
-1. **Discover context** → Use `board` tool to see project state
-2. **Search for related work** → Use `search` tool before creating new specs
-3. **Never create files manually** → Always use `create` tool for new specs
+### Rules
 
-> **Why?** Skipping discovery creates duplicate work. Manual file creation breaks LeanSpec tooling.
-
-## 🔧 Managing Specs
-
-### MCP Tools (Preferred) with CLI Fallback
-
-| Action         | MCP Tool   | CLI Fallback                                   |
-| -------------- | ---------- | ---------------------------------------------- |
-| Project status | `board`    | `lean-spec board`                              |
-| List specs     | `list`     | `lean-spec list`                               |
-| Search specs   | `search`   | `lean-spec search "query"`                     |
-| View spec      | `view`     | `lean-spec view <spec>`                        |
-| Create spec    | `create`   | `lean-spec create <name>`                      |
-| Update spec    | `update`   | `lean-spec update <spec> --status <status>`    |
-| Link specs     | `link`     | `lean-spec link <spec> --depends-on <other>`   |
-| Unlink specs   | `unlink`   | `lean-spec unlink <spec> --depends-on <other>` |
-| Dependencies   | `deps`     | `lean-spec deps <spec>`                        |
-| Token count    | `tokens`   | `lean-spec tokens <spec>`                      |
-| Validate specs | `validate` | `lean-spec validate`                           |
-
-## ⚠️ Core Rules
-
-| Rule                                | Details                                                                                                               |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| **NEVER edit frontmatter manually** | Use `update`, `link`, `unlink` for: `status`, `priority`, `tags`, `assignee`, `transitions`, timestamps, `depends_on` |
-| **ALWAYS link spec references**     | Content mentions another spec → `lean-spec link <spec> --depends-on <other>`                                          |
-| **Track status transitions**        | `planned` → `in-progress` (before coding) → `complete` (after done)                                                   |
-| **Keep specs current**              | Document progress, decisions, and learnings as work happens. Obsolete specs mislead both humans and AI                |
-| **No nested code blocks**           | Use indentation instead                                                                                               |
-
-### 🚫 Common Mistakes
-
-| ❌ Don't                             | ✅ Do Instead                                |
-| ----------------------------------- | ------------------------------------------- |
-| Create spec files manually          | Use `create` tool                           |
-| Skip discovery                      | Run `board` and `search` first              |
-| Leave status as "planned"           | Update to `in-progress` before coding       |
-| Edit frontmatter manually           | Use `update` tool                           |
-| Complete spec without documentation | Document progress, prompts, learnings first |
-
-## 📋 SDD Workflow
-
-```
-BEFORE: board → search → check existing specs
-DURING: update status to in-progress → code → document decisions → link dependencies
-AFTER:  document completion → update status to complete
-```
-
-**Status tracks implementation, NOT spec writing.**
-
-## Spec Dependencies
-
-Use `depends_on` to express blocking relationships between specs:
-- **`depends_on`** = True blocker, work order matters, directional (A depends on B)
-
-Link dependencies when one spec builds on another:
-```bash
-lean-spec link <spec> --depends-on <other-spec>
-```
-
-## When to Use Specs
-
-| ✅ Write spec        | ❌ Skip spec                |
-| ------------------- | -------------------------- |
-| Multi-part features | Bug fixes                  |
-| Breaking changes    | Trivial changes            |
-| Design decisions    | Self-explanatory refactors |
-
-## Token Thresholds
-
-| Tokens      | Status               |
-| ----------- | -------------------- |
-| <2,000      | ✅ Optimal            |
-| 2,000-3,500 | ✅ Good               |
-| 3,500-5,000 | ⚠️ Consider splitting |
-| >5,000      | 🔴 Must split         |
-
-## Quality Validation
-
-Before completing work, validate spec quality:
-```bash
-lean-spec validate              # Check structure and quality
-lean-spec validate --check-deps # Verify dependency alignment
-```
-
-Validation checks:
-- Missing required sections
-- Excessive length (>400 lines)
-- Content/frontmatter dependency misalignment
-- Invalid frontmatter fields
-
-## 🎯 Implementation Guidelines
-
-When contributing code to Ising, keep these in mind:
-
-- **Maintainability is our product** — our own code must exemplify what we preach. Keep modules decoupled, APIs clean, and dependencies minimal.
-- **Portable builds** — avoid external C library dependencies (e.g., LAPACK). Pure Rust preferred.
-- **Workspace conventions** — shared deps in root `Cargo.toml` via `[workspace.dependencies]`. Crates inherit with `workspace = true`.
-- **Testing** — unit tests alongside modules. Integration tests for cross-module workflows (e.g., graph → physics pipeline).
-
-## First Principles (Priority Order)
-
-1. **Context Economy** - <2,000 tokens optimal, >3,500 needs splitting
-2. **Signal-to-Noise** - Every word must inform a decision
-3. **Intent Over Implementation** - Capture why, let how emerge
-4. **Bridge the Gap** - Both human and AI must understand
-5. **Progressive Disclosure** - Add complexity only when pain is felt
-
----
-
-**Remember:** LeanSpec tracks what you're building. Keep specs in sync with your work!
+- Never edit spec frontmatter manually -- use `update`, `link`, `unlink` tools
+- Track status transitions: `planned` -> `in-progress` -> `complete`
+- Keep specs current and in sync with implementation
+- No nested code blocks in specs (use indentation instead)
