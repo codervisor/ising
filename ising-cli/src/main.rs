@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use ising_analysis::signals::detect_signals;
+use ising_analysis::signals::{detect_signals, summarize_signals};
 use ising_analysis::stress;
 use ising_core::config::Config;
 use ising_core::fea::{LoadCase, RiskTier};
@@ -264,8 +264,9 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
         )?;
     }
 
-    // Compute and store risk field
-    let risk_field = stress::compute_risk_field(&graph, &config);
+    // Compute and store risk field (with signal summary for health index)
+    let signal_summary = summarize_signals(&signals);
+    let risk_field = stress::compute_risk_field(&graph, &config, Some(&signal_summary));
     db.store_risk_field(&risk_field)?;
 
     let critical_count = risk_field
@@ -602,21 +603,57 @@ fn cmd_health(args: HealthArgs) -> Result<i32> {
                 "  Active modules:     {} / {}",
                 health.active_modules, health.total_modules
             );
-            println!("  Critical (top 1%):  {}", health.critical_count);
-            println!("  High (top 5%):      {}", health.high_count);
+            println!();
+            println!("  Sub-scores:");
             println!(
-                "  Risk concentration: {:.0}%",
+                "    Risk:             {:.2}  (avg direct score, concentration)",
+                health.risk_sub_score
+            );
+            println!(
+                "    Signals:          {:.2}  (god modules, bombs, fragile boundaries)",
+                health.signal_sub_score
+            );
+            println!(
+                "    Structure:        {:.2}  (cycles, unstable deps)",
+                health.structural_sub_score
+            );
+            println!();
+            println!(
+                "  Signal density:     {:.3} signals/module",
+                health.signal_density
+            );
+            if health.god_module_density > 0.0 {
+                println!(
+                    "    God modules:      {:.1}%",
+                    health.god_module_density * 100.0
+                );
+            }
+            if health.cycle_density > 0.0 {
+                println!(
+                    "    Dep cycles:       {:.1}%",
+                    health.cycle_density * 100.0
+                );
+            }
+            if health.unstable_dep_density > 0.0 {
+                println!(
+                    "    Unstable deps:    {:.1}%",
+                    health.unstable_dep_density * 100.0
+                );
+            }
+            println!();
+            println!("  Risk distribution:");
+            println!("    Critical (top 1%): {}", health.critical_count);
+            println!("    High (top 5%):     {}", health.high_count);
+            println!(
+                "    Concentration:     {:.0}%",
                 health.risk_concentration * 100.0
             );
-            println!("  Avg direct score:   {:.3}", health.avg_direct_score);
-            println!();
-            if health.risk_concentration > 0.7 {
-                println!(
-                    "  Risk is concentrated in {} hot modules — targeted refactoring will help.",
-                    health.critical_count + health.high_count
-                );
-            } else {
-                println!("  Risk is diffuse across the codebase — systemic improvement needed.");
+            if !health.caveats.is_empty() {
+                println!();
+                println!("  Caveats:");
+                for caveat in &health.caveats {
+                    println!("    * {}", caveat);
+                }
             }
         }
     }
@@ -644,7 +681,7 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
     };
 
     // Compute baseline and loaded risk fields
-    let baseline = stress::compute_risk_field(&graph, &config);
+    let baseline = stress::compute_risk_field(&graph, &config, None);
     let loaded = stress::simulate_load_case(&graph, &config, &load_case);
     let delta = stress::compare_risk_fields(&baseline, &loaded);
 

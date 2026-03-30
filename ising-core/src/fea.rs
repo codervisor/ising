@@ -143,8 +143,14 @@ pub struct RiskField {
 
 /// Aggregate health index for a repository.
 ///
-/// A single-number summary derived from the distribution of direct risk scores
-/// and their concentration. Analogous to a camera's exposure meter reading.
+/// A composite score derived from three sub-scores:
+/// 1. **Risk sub-score** — avg direct risk + concentration (the original formula, amplified)
+/// 2. **Signal sub-score** — density of architectural signals (god modules, cycles, etc.)
+/// 3. **Structural sub-score** — entanglement from cycles + unstable dependencies
+///
+/// Decomposing into sub-scores prevents bias by making it transparent what drives
+/// the grade. Users can see whether a low grade comes from change risk, architectural
+/// signals, or structural entanglement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthIndex {
     /// Overall health score [0.0, 1.0]. Higher = healthier.
@@ -164,6 +170,39 @@ pub struct HealthIndex {
     pub risk_concentration: f64,
     /// Average direct score across active modules.
     pub avg_direct_score: f64,
+
+    // --- Signal density metrics (per-module, for cross-repo comparability) ---
+
+    /// Total signals / total_modules. Higher = more architectural issues per module.
+    #[serde(default)]
+    pub signal_density: f64,
+    /// God module count / total_modules.
+    #[serde(default)]
+    pub god_module_density: f64,
+    /// Dependency cycle signal count / total_modules.
+    #[serde(default)]
+    pub cycle_density: f64,
+    /// Unstable dependency signal count / total_modules.
+    #[serde(default)]
+    pub unstable_dep_density: f64,
+
+    // --- Sub-scores for transparency [0.0, 1.0] each ---
+
+    /// From avg_direct_score + concentration. Measures change-risk pressure.
+    #[serde(default)]
+    pub risk_sub_score: f64,
+    /// From signal densities. Measures architectural health.
+    #[serde(default)]
+    pub signal_sub_score: f64,
+    /// From cycles + unstable deps. Measures structural entanglement.
+    #[serde(default)]
+    pub structural_sub_score: f64,
+
+    // --- Transparency ---
+
+    /// Caveats about data quality or potential bias in this analysis.
+    #[serde(default)]
+    pub caveats: Vec<String>,
 }
 
 /// A single load point in a load case.
