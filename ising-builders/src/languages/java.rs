@@ -129,10 +129,10 @@ fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
             }
             "binary_expression" => {
                 // Count && and ||
-                if let Some(op) = node.child_by_field_name("operator") {
-                    if op.kind() == "&&" || op.kind() == "||" {
-                        *decisions += 1;
-                    }
+                if let Some(op) = node.child_by_field_name("operator")
+                    && (op.kind() == "&&" || op.kind() == "||")
+                {
+                    *decisions += 1;
                 }
             }
             "lambda_expression" => {
