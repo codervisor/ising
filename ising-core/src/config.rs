@@ -52,7 +52,7 @@ pub struct ThresholdConfig {
     #[serde(default = "default_fragile_fault")]
     pub fragile_boundary_fault_prop: f64,
     /// Max coupling for unnecessary abstraction signal.
-    #[serde(default = "default_unnecessary_abstraction")]
+    #[serde(default = "default_unnecessary_abstraction", alias = "over_engineering_coupling")]
     pub unnecessary_abstraction_coupling: f64,
     /// Minimum complexity for god module signal.
     #[serde(default = "default_god_module_complexity")]
@@ -273,5 +273,15 @@ min_co_changes = 10
         assert_eq!(config.thresholds.min_co_changes, 10);
         // Defaults for unspecified fields
         assert_eq!(config.thresholds.min_coupling, 0.3);
+    }
+
+    #[test]
+    fn test_legacy_over_engineering_coupling_key() {
+        let toml_str = r#"
+[thresholds]
+over_engineering_coupling = 0.1
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.thresholds.unnecessary_abstraction_coupling, 0.1);
     }
 }
