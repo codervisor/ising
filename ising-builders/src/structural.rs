@@ -89,10 +89,8 @@ pub fn build_structural_graph(
             let all_deprecated = result.functions.iter().all(|f| f.deprecated)
                 && result.classes.iter().all(|c| c.deprecated)
                 && (!result.functions.is_empty() || !result.classes.is_empty());
-            if all_deprecated {
-                if let Some(module_node) = graph.get_node_mut(&result.module_id) {
-                    module_node.deprecated = true;
-                }
+            if all_deprecated && let Some(module_node) = graph.get_node_mut(&result.module_id) {
+                module_node.deprecated = true;
             }
         }
     }

@@ -210,10 +210,7 @@ fn has_deprecated_attribute(node: tree_sitter::Node<'_>, source: &str) -> bool {
     let mut sibling = node.prev_sibling();
     while let Some(s) = sibling {
         if s.kind() == "attribute_item" || s.kind() == "inner_attribute_item" {
-            let text = s
-                .utf8_text(source.as_bytes())
-                .unwrap_or("")
-                .to_lowercase();
+            let text = s.utf8_text(source.as_bytes()).unwrap_or("").to_lowercase();
             if text.contains("deprecated") {
                 return true;
             }

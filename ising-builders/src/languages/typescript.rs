@@ -78,15 +78,15 @@ pub fn extract_nodes_with_offset(
 
 /// Check if a node has a `@deprecated` JSDoc comment preceding it.
 fn has_deprecated_jsdoc(node: tree_sitter::Node<'_>, source: &str) -> bool {
-    if let Some(prev) = node.prev_sibling() {
-        if prev.kind() == "comment" {
-            let text = prev
-                .utf8_text(source.as_bytes())
-                .unwrap_or("")
-                .to_lowercase();
-            if text.contains("@deprecated") {
-                return true;
-            }
+    if let Some(prev) = node.prev_sibling()
+        && prev.kind() == "comment"
+    {
+        let text = prev
+            .utf8_text(source.as_bytes())
+            .unwrap_or("")
+            .to_lowercase();
+        if text.contains("@deprecated") {
+            return true;
         }
     }
     false
@@ -96,18 +96,18 @@ fn has_deprecated_jsdoc(node: tree_sitter::Node<'_>, source: &str) -> bool {
 fn extract_calls_from_body(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
     let mut calls = Vec::new();
     fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
-        if node.kind() == "call_expression" {
-            if let Some(func_node) = node.child_by_field_name("function") {
-                let callee = func_node
-                    .utf8_text(source.as_bytes())
-                    .unwrap_or("")
-                    .to_string();
-                if !callee.is_empty() {
-                    calls.push(CallInfo {
-                        callee,
-                        line: node.start_position().row as u32 + 1,
-                    });
-                }
+        if node.kind() == "call_expression"
+            && let Some(func_node) = node.child_by_field_name("function")
+        {
+            let callee = func_node
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .to_string();
+            if !callee.is_empty() {
+                calls.push(CallInfo {
+                    callee,
+                    line: node.start_position().row as u32 + 1,
+                });
             }
         }
         let mut cursor = node.walk();

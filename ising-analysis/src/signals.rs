@@ -1033,9 +1033,8 @@ fn is_trait_or_framework_method(name: &str) -> bool {
 
 /// Check if a function looks like a React/Vue component (PascalCase in .tsx/.jsx/.vue).
 fn is_component_function(name: &str, file_path: &str) -> bool {
-    let is_component_file = file_path.ends_with(".tsx")
-        || file_path.ends_with(".jsx")
-        || file_path.ends_with(".vue");
+    let is_component_file =
+        file_path.ends_with(".tsx") || file_path.ends_with(".jsx") || file_path.ends_with(".vue");
     if !is_component_file {
         return false;
     }
@@ -1145,10 +1144,7 @@ fn is_config_or_standalone_file(path: &str) -> bool {
 /// Detect modules with zero incoming Imports edges (potential dead code).
 ///
 /// Excludes entry points: main.py, index.ts, lib.rs, etc.
-fn detect_orphan_modules(
-    graph: &UnifiedGraph,
-    import_edges: &[(&str, &str, f64)],
-) -> Vec<Signal> {
+fn detect_orphan_modules(graph: &UnifiedGraph, import_edges: &[(&str, &str, f64)]) -> Vec<Signal> {
     use ising_core::graph::NodeType;
 
     // Build set of all module IDs that are imported by someone
@@ -1217,36 +1213,38 @@ fn detect_deprecated_usage(graph: &UnifiedGraph) -> Vec<Signal> {
     // Check for calls to deprecated functions
     for (caller, callee, _) in &calls_edges {
         if let Some(node) = graph.get_node(callee)
-            && node.deprecated {
-                let callee_name = callee.rsplit("::").next().unwrap_or(callee);
-                signals.push(Signal::new(
-                    SignalType::DeprecatedUsage,
-                    caller,
-                    Some(callee),
-                    1.5,
-                    format!(
-                        "'{}' calls deprecated function '{}' — should be migrated",
-                        caller, callee_name
-                    ),
-                ));
-            }
+            && node.deprecated
+        {
+            let callee_name = callee.rsplit("::").next().unwrap_or(callee);
+            signals.push(Signal::new(
+                SignalType::DeprecatedUsage,
+                caller,
+                Some(callee),
+                1.5,
+                format!(
+                    "'{}' calls deprecated function '{}' — should be migrated",
+                    caller, callee_name
+                ),
+            ));
+        }
     }
 
     // Check for imports of deprecated modules
     for (importer, imported, _) in &import_edges {
         if let Some(node) = graph.get_node(imported)
-            && node.deprecated {
-                signals.push(Signal::new(
-                    SignalType::DeprecatedUsage,
-                    importer,
-                    Some(imported),
-                    1.0,
-                    format!(
-                        "'{}' imports deprecated module '{}' — should be migrated",
-                        importer, imported
-                    ),
-                ));
-            }
+            && node.deprecated
+        {
+            signals.push(Signal::new(
+                SignalType::DeprecatedUsage,
+                importer,
+                Some(imported),
+                1.0,
+                format!(
+                    "'{}' imports deprecated module '{}' — should be migrated",
+                    importer, imported
+                ),
+            ));
+        }
     }
 
     signals
@@ -1349,9 +1347,10 @@ fn detect_intra_file_hotspots(graph: &UnifiedGraph) -> Vec<Signal> {
 
     for (module_id, func_id, _) in &contains_edges {
         if let Some(node) = graph.get_node(func_id)
-            && node.node_type != NodeType::Function {
-                continue;
-            }
+            && node.node_type != NodeType::Function
+        {
+            continue;
+        }
         let churn = graph
             .change_metrics
             .get(*func_id)
@@ -2003,8 +2002,13 @@ mod tests {
         g.add_node(Node::module("utils.py", "utils.py"));
         let f = Node::function("utils.py::unused_helper", "utils.py", 10, 20);
         g.add_node(f);
-        g.add_edge("utils.py", "utils.py::unused_helper", EdgeType::Contains, 1.0)
-            .unwrap();
+        g.add_edge(
+            "utils.py",
+            "utils.py::unused_helper",
+            EdgeType::Contains,
+            1.0,
+        )
+        .unwrap();
         // No Calls edges pointing to this function
 
         let signals = detect_signals(&g, &default_config());
@@ -2029,10 +2033,9 @@ mod tests {
 
         let signals = detect_signals(&g, &default_config());
         assert!(
-            !signals
-                .iter()
-                .any(|s| s.signal_type == SignalType::OrphanFunction
-                    && s.node_a == "app.py::helper"),
+            !signals.iter().any(
+                |s| s.signal_type == SignalType::OrphanFunction && s.node_a == "app.py::helper"
+            ),
             "Function with callers should not be flagged as orphan"
         );
     }
@@ -2250,7 +2253,10 @@ mod tests {
 
     #[test]
     fn test_component_function_not_flagged_as_orphan() {
-        assert!(is_component_function("BlastRadius", "src/views/BlastRadius.tsx"));
+        assert!(is_component_function(
+            "BlastRadius",
+            "src/views/BlastRadius.tsx"
+        ));
         assert!(is_component_function("App", "src/App.jsx"));
         assert!(!is_component_function("BlastRadius", "src/views/blast.rs"));
         assert!(!is_component_function("helper", "src/views/Foo.tsx"));
@@ -2302,8 +2308,10 @@ mod tests {
 
         let signals = detect_signals(&g, &default_config());
         assert!(
-            !signals.iter().any(|s| s.signal_type == SignalType::OrphanFunction
-                && s.node_a == "db.rs::Database::open"),
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanFunction
+                    && s.node_a == "db.rs::Database::open"),
             "Qualified struct methods should not be flagged as orphan"
         );
     }
@@ -2323,8 +2331,9 @@ mod tests {
 
         let signals = detect_signals(&g, &default_config());
         assert!(
-            !signals.iter().any(|s| s.signal_type == SignalType::OrphanModule
-                && s.node_a == "vite.config.ts"),
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanModule && s.node_a == "vite.config.ts"),
             "Config files should not be flagged as orphan modules"
         );
     }
@@ -2344,8 +2353,10 @@ mod tests {
 
         let signals = detect_signals(&g, &default_config());
         assert!(
-            !signals.iter().any(|s| s.signal_type == SignalType::OrphanModule
-                && s.node_a == "scripts/deploy.ts"),
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanModule
+                    && s.node_a == "scripts/deploy.ts"),
             "Script files should not be flagged as orphan modules"
         );
     }
