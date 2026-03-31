@@ -401,7 +401,10 @@ pub fn compute_function_risks(graph: &UnifiedGraph, config: &Config, field: &mut
     for node_id in &func_ids {
         let change_load = local_loads.get(node_id).copied().unwrap_or(0.0);
         let capacity = capacities.get(node_id).copied().unwrap_or(1.0);
-        let raw_total = propagated.get(node_id.as_str()).copied().unwrap_or(change_load);
+        let raw_total = propagated
+            .get(node_id.as_str())
+            .copied()
+            .unwrap_or(change_load);
         let propagated_risk = (raw_total - change_load).max(0.0);
         let total_risk = change_load + propagated_risk;
 
@@ -1096,8 +1099,13 @@ mod tests {
             .unwrap();
         g.add_edge("app.py", "app.py::cool_func", EdgeType::Contains, 1.0)
             .unwrap();
-        g.add_edge("app.py::hot_func", "app.py::cool_func", EdgeType::Calls, 1.0)
-            .unwrap();
+        g.add_edge(
+            "app.py::hot_func",
+            "app.py::cool_func",
+            EdgeType::Calls,
+            1.0,
+        )
+        .unwrap();
 
         // Function-level change metrics
         g.change_metrics.insert(

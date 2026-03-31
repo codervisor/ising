@@ -166,18 +166,18 @@ fn has_obsolete_attribute(node: tree_sitter::Node<'_>, source: &str) -> bool {
 fn extract_calls(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
     let mut calls = Vec::new();
     fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
-        if node.kind() == "invocation_expression" {
-            if let Some(func_node) = node.child_by_field_name("function") {
-                let callee = func_node
-                    .utf8_text(source.as_bytes())
-                    .unwrap_or("")
-                    .to_string();
-                if !callee.is_empty() {
-                    calls.push(CallInfo {
-                        callee,
-                        line: node.start_position().row as u32 + 1,
-                    });
-                }
+        if node.kind() == "invocation_expression"
+            && let Some(func_node) = node.child_by_field_name("function")
+        {
+            let callee = func_node
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .to_string();
+            if !callee.is_empty() {
+                calls.push(CallInfo {
+                    callee,
+                    line: node.start_position().row as u32 + 1,
+                });
             }
         }
         let mut cursor = node.walk();

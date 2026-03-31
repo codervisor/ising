@@ -280,13 +280,16 @@ pub fn build_change_graph(
     Ok(graph)
 }
 
+/// Per-file change info: (file_path, total_churn, hunk_ranges).
+type FileChangeInfo = (String, u32, Vec<(u32, u32)>);
+
 /// Get the list of changed files in a commit with per-file line churn counts.
-/// Returns Vec of (file_path, total_churn).
+/// Returns Vec of (file_path, total_churn, hunk_ranges).
 fn get_changed_files_with_hunks(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
-) -> Result<Vec<(String, u32, Vec<(u32, u32)>)>, anyhow::Error> {
-    let mut changed: Vec<(String, u32, Vec<(u32, u32)>)> = Vec::new();
+) -> Result<Vec<FileChangeInfo>, anyhow::Error> {
+    let mut changed: Vec<FileChangeInfo> = Vec::new();
     let mut resource_cache = repo.diff_resource_cache_for_tree_diff().ok();
 
     let tree = commit.tree()?;

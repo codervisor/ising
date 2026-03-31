@@ -65,15 +65,14 @@ fn attribute_changes_to_functions(graph: &mut UnifiedGraph) {
     let mut module_children: std::collections::HashMap<String, Vec<(String, u32, u32)>> =
         std::collections::HashMap::new();
     for (module_id, child_id, _) in &contains_edges {
-        if let Some(child) = graph.get_node(child_id) {
-            if child.node_type == NodeType::Function || child.node_type == NodeType::Class {
-                if let (Some(start), Some(end)) = (child.line_start, child.line_end) {
-                    module_children
-                        .entry(module_id.to_string())
-                        .or_default()
-                        .push((child_id.to_string(), start, end));
-                }
-            }
+        if let Some(child) = graph.get_node(child_id)
+            && (child.node_type == NodeType::Function || child.node_type == NodeType::Class)
+            && let (Some(start), Some(end)) = (child.line_start, child.line_end)
+        {
+            module_children
+                .entry(module_id.to_string())
+                .or_default()
+                .push((child_id.to_string(), start, end));
         }
     }
 
@@ -86,10 +85,7 @@ fn attribute_changes_to_functions(graph: &mut UnifiedGraph) {
             _ => continue,
         };
 
-        let module_loc = graph
-            .get_node(module_id)
-            .and_then(|n| n.loc)
-            .unwrap_or(1) as f64;
+        let module_loc = graph.get_node(module_id).and_then(|n| n.loc).unwrap_or(1) as f64;
 
         for (child_id, start, end) in children {
             let child_lines = (end.saturating_sub(*start) + 1) as f64;
@@ -124,6 +120,9 @@ fn attribute_changes_to_functions(graph: &mut UnifiedGraph) {
         graph.change_metrics.insert(id, metrics);
     }
     if count > 0 {
-        tracing::info!("Attributed change metrics to {} function/class nodes", count);
+        tracing::info!(
+            "Attributed change metrics to {} function/class nodes",
+            count
+        );
     }
 }
