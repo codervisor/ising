@@ -62,6 +62,9 @@ pub fn build_change_graph(
     let mut file_changes: HashMap<String, u32> = HashMap::new();
     let mut file_churn: HashMap<String, u32> = HashMap::new();
     let mut co_changes: HashMap<(String, String), u32> = HashMap::new();
+    let mut file_last_changed: HashMap<String, i64> = HashMap::new(); // file -> most recent commit timestamp
+    // Per-file hunk accumulator: file -> Vec<(line_start, line_count)> across all commits
+    let mut file_hunks: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
     let mut total_commits: u32 = 0;
     let mut skipped_large: u32 = 0;
     let mut skipped_old: u32 = 0;
@@ -114,10 +117,27 @@ pub fn build_change_graph(
         }
 
         // Get changed files with per-file churn lines by diffing against parent.
-        let changed_map: HashMap<String, u32> = get_changed_files(&repo, &commit)?
-            .into_iter()
-            .filter(|(f, _)| Language::is_supported_file(f) && !ignore.is_ignored(f))
+        let changed_files_raw = get_changed_files_with_hunks(&repo, &commit)?;
+        let changed_map: HashMap<String, u32> = changed_files_raw
+            .iter()
+            .filter(|(f, _, _)| Language::is_supported_file(f) && !ignore.is_ignored(f))
+            .map(|(f, churn, _)| (f.clone(), *churn))
             .collect();
+
+        // Track last_changed timestamp and hunks
+        let commit_time = commit.time().ok().map(|t| t.seconds).unwrap_or(0);
+        for (file, _, hunks) in &changed_files_raw {
+            if !Language::is_supported_file(file) || ignore.is_ignored(file) {
+                continue;
+            }
+            let entry = file_last_changed.entry(file.clone()).or_insert(0);
+            if commit_time > *entry {
+                *entry = commit_time;
+            }
+            if !hunks.is_empty() {
+                file_hunks.entry(file.clone()).or_default().extend(hunks);
+            }
+        }
 
         if !changed_map.is_empty() {
             // Skip bulk commits that touch too many files (noisy: mass renames, formatting, etc.)
@@ -234,6 +254,16 @@ pub fn build_change_graph(
         } else {
             0.0
         };
+        // Convert last_changed timestamp to ISO-8601 string
+        let last_changed = file_last_changed.get(file).and_then(|ts| {
+            if *ts > 0 {
+                let dt = chrono::DateTime::from_timestamp(*ts, 0)?;
+                Some(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            } else {
+                None
+            }
+        });
+
         graph.change_metrics.insert(
             file.clone(),
             ChangeMetrics {
@@ -242,7 +272,7 @@ pub fn build_change_graph(
                 churn_rate,
                 hotspot_score: hotspot,
                 sum_coupling,
-                last_changed: None,
+                last_changed,
             },
         );
     }
@@ -251,12 +281,12 @@ pub fn build_change_graph(
 }
 
 /// Get the list of changed files in a commit with per-file line churn counts.
-/// Returns a map from file path to (lines_added + lines_removed) for that commit.
-fn get_changed_files(
+/// Returns Vec of (file_path, total_churn).
+fn get_changed_files_with_hunks(
     repo: &gix::Repository,
     commit: &gix::Commit<'_>,
-) -> Result<HashMap<String, u32>, anyhow::Error> {
-    let mut changed: HashMap<String, u32> = HashMap::new();
+) -> Result<Vec<(String, u32, Vec<(u32, u32)>)>, anyhow::Error> {
+    let mut changed: Vec<(String, u32, Vec<(u32, u32)>)> = Vec::new();
     let mut resource_cache = repo.diff_resource_cache_for_tree_diff().ok();
 
     let tree = commit.tree()?;
@@ -285,7 +315,8 @@ fn get_changed_files(
                         Some(counts.insertions + counts.removals)
                     })
                     .unwrap_or(0);
-                changed.insert(path.to_string(), churn);
+                // Hunks are empty for now — hunk-level attribution uses a separate pass
+                changed.push((path.to_string(), churn, Vec::new()));
             }
             Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue)
         })?;

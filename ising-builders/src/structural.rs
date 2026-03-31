@@ -40,6 +40,7 @@ pub fn build_structural_graph(
 
         // Add function nodes + contains edges, track total complexity for module
         let mut module_complexity: u32 = 0;
+        let mut has_deprecated = false;
 
         for func in &result.functions {
             let func_id = format!("{}::{}", result.module_id, func.name);
@@ -47,6 +48,10 @@ pub fn build_structural_graph(
                 Node::function(&func_id, &result.file_path, func.line_start, func.line_end);
             func_node.language = Some(result.language.clone());
             func_node.complexity = Some(func.complexity);
+            func_node.deprecated = func.deprecated;
+            if func.deprecated {
+                has_deprecated = true;
+            }
             module_complexity += func.complexity;
             graph.add_node(func_node);
             let _ = graph.add_edge(&result.module_id, &func_id, EdgeType::Contains, 1.0);
@@ -63,6 +68,10 @@ pub fn build_structural_graph(
             );
             class_node.language = Some(result.language.clone());
             class_node.complexity = Some(class.complexity);
+            class_node.deprecated = class.deprecated;
+            if class.deprecated {
+                has_deprecated = true;
+            }
             module_complexity += class.complexity;
             graph.add_node(class_node);
             let _ = graph.add_edge(&result.module_id, &class_id, EdgeType::Contains, 1.0);
@@ -73,6 +82,18 @@ pub fn build_structural_graph(
             && let Some(module_node) = graph.get_node_mut(&result.module_id)
         {
             module_node.complexity = Some(module_complexity);
+        }
+
+        // Mark module as deprecated if all its functions/classes are deprecated
+        if has_deprecated {
+            let all_deprecated = result.functions.iter().all(|f| f.deprecated)
+                && result.classes.iter().all(|c| c.deprecated)
+                && (!result.functions.is_empty() || !result.classes.is_empty());
+            if all_deprecated {
+                if let Some(module_node) = graph.get_node_mut(&result.module_id) {
+                    module_node.deprecated = true;
+                }
+            }
         }
     }
 
@@ -157,6 +178,88 @@ pub fn build_structural_graph(
                 }
             }
         }
+    }
+
+    // Resolve Calls edges from function call information.
+    // Collect all known function node IDs for resolution.
+    let known_func_ids: std::collections::HashSet<String> = file_results
+        .iter()
+        .flat_map(|r| {
+            r.functions
+                .iter()
+                .map(move |f| format!("{}::{}", r.module_id, f.name))
+        })
+        .collect();
+
+    // Build import map: module_id -> Vec<imported_module_id> (owned strings to avoid borrow issues)
+    let import_map: std::collections::HashMap<String, Vec<String>> = {
+        let mut map: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (src, tgt, _) in graph.edges_of_type(&EdgeType::Imports) {
+            map.entry(src.to_string())
+                .or_default()
+                .push(tgt.to_string());
+        }
+        map
+    };
+
+    // Collect all Calls edges to add (to avoid borrowing graph while mutating)
+    let mut calls_to_add: Vec<(String, String)> = Vec::new();
+
+    for result in &file_results {
+        for func in &result.functions {
+            let caller_id = format!("{}::{}", result.module_id, func.name);
+            for call in &func.calls {
+                // Normalize callee: strip "self." / "this." prefix
+                let callee = call
+                    .callee
+                    .strip_prefix("self.")
+                    .or_else(|| call.callee.strip_prefix("this."))
+                    .unwrap_or(&call.callee);
+
+                // Strategy 1: Same-file resolution — look for module_id::callee
+                let same_file_id = format!("{}::{}", result.module_id, callee);
+                if known_func_ids.contains(&same_file_id) && same_file_id != caller_id {
+                    calls_to_add.push((caller_id.clone(), same_file_id));
+                    continue;
+                }
+
+                // Strategy 2: Qualified call like "obj.method" -> try imported modules
+                if let Some(dot_pos) = callee.find('.') {
+                    let method = &callee[dot_pos + 1..];
+                    if let Some(imports) = import_map.get(&result.module_id) {
+                        let mut resolved = false;
+                        for imp_module in imports {
+                            let target_id = format!("{}::{}", imp_module, method);
+                            if known_func_ids.contains(&target_id) {
+                                calls_to_add.push((caller_id.clone(), target_id));
+                                resolved = true;
+                                break;
+                            }
+                        }
+                        if resolved {
+                            continue;
+                        }
+                    }
+                }
+
+                // Strategy 3: Simple name — try imported modules
+                if let Some(imports) = import_map.get(&result.module_id) {
+                    for imp_module in imports {
+                        let target_id = format!("{}::{}", imp_module, callee);
+                        if known_func_ids.contains(&target_id) {
+                            calls_to_add.push((caller_id.clone(), target_id));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add all resolved Calls edges
+    for (from, to) in &calls_to_add {
+        let _ = graph.add_edge(from, to, EdgeType::Calls, 1.0);
     }
 
     Ok(graph)

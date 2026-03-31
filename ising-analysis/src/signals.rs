@@ -33,6 +33,16 @@ pub enum SignalType {
     UnstableDependency,
     /// Median/P75 complexity is high across the codebase — distributed complexity risk.
     SystemicComplexity,
+    /// Function with zero callers, not an entry point — potentially dead code.
+    OrphanFunction,
+    /// Module with zero importers, not an entry point — potentially dead code.
+    OrphanModule,
+    /// Deprecated symbol still being called or imported — migration risk.
+    DeprecatedUsage,
+    /// Code unchanged for extended period with low connectivity — possibly obsolete.
+    StaleCode,
+    /// Function churns far more than siblings in the same file — intra-file hotspot.
+    IntraFileHotspot,
 }
 
 impl SignalType {
@@ -48,6 +58,10 @@ impl SignalType {
             | SignalType::SystemicComplexity => "high",
             SignalType::StableCore => "guard",
             SignalType::UnnecessaryAbstraction => "info",
+            SignalType::OrphanFunction | SignalType::OrphanModule => "info",
+            SignalType::DeprecatedUsage => "high",
+            SignalType::StaleCode => "info",
+            SignalType::IntraFileHotspot => "high",
         }
     }
 }
@@ -114,6 +128,11 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         &config.thresholds,
     ));
     signals.extend(detect_systemic_complexity(&node_ids, graph));
+    signals.extend(detect_orphan_functions(graph));
+    signals.extend(detect_orphan_modules(graph, &import_edges));
+    signals.extend(detect_deprecated_usage(graph));
+    signals.extend(detect_stale_code(graph));
+    signals.extend(detect_intra_file_hotspots(graph));
 
     signals.sort_by(|a, b| {
         b.severity
@@ -859,7 +878,13 @@ pub fn summarize_signals(signals: &[Signal]) -> SignalSummary {
             SignalType::ShotgunSurgery => summary.shotgun_surgery_count += 1,
             SignalType::GhostCoupling => summary.ghost_coupling_count += 1,
             SignalType::SystemicComplexity => summary.systemic_complexity_count += 1,
-            SignalType::StableCore | SignalType::UnnecessaryAbstraction => {}
+            SignalType::StableCore
+            | SignalType::UnnecessaryAbstraction
+            | SignalType::OrphanFunction
+            | SignalType::OrphanModule
+            | SignalType::DeprecatedUsage
+            | SignalType::StaleCode
+            | SignalType::IntraFileHotspot => {}
         }
     }
     summary
@@ -871,6 +896,367 @@ fn is_reexport_module(path: &str) -> bool {
         || filename == "index.ts"
         || filename == "index.js"
         || filename == "mod.rs"
+}
+
+/// Detect functions with zero incoming Calls edges (potential dead code).
+///
+/// Excludes entry points: main, __init__, test functions, init, new, etc.
+fn detect_orphan_functions(graph: &UnifiedGraph) -> Vec<Signal> {
+    use ising_core::graph::NodeType;
+
+    let calls_edges = graph.edges_of_type(&EdgeType::Calls);
+
+    // Build set of all function IDs that are called by someone
+    let mut called_functions: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (_, target, _) in &calls_edges {
+        called_functions.insert(target);
+    }
+
+    let mut signals = Vec::new();
+    for node_id in graph.node_ids() {
+        let node = match graph.get_node(node_id) {
+            Some(n) if n.node_type == NodeType::Function => n,
+            _ => continue,
+        };
+
+        // Skip if this function is called by anyone
+        if called_functions.contains(node_id) {
+            continue;
+        }
+
+        // Skip entry points and common patterns
+        let func_name = node_id.rsplit("::").next().unwrap_or(node_id);
+        if is_entry_point_function(func_name) {
+            continue;
+        }
+
+        // Skip test functions
+        if func_name.starts_with("test_") || func_name.starts_with("Test") {
+            continue;
+        }
+
+        // Skip if the function is in a test file
+        if is_test_file(&node.file_path) {
+            continue;
+        }
+
+        signals.push(Signal::new(
+            SignalType::OrphanFunction,
+            node_id,
+            None,
+            0.5,
+            format!(
+                "Function '{}' has no detected callers — may be unused or called dynamically",
+                func_name
+            ),
+        ));
+    }
+    signals
+}
+
+/// Check if a function name is a common entry point.
+fn is_entry_point_function(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "main"
+            | "__init__"
+            | "__new__"
+            | "init"
+            | "new"
+            | "setup"
+            | "teardown"
+            | "configure"
+            | "run"
+            | "start"
+            | "serve"
+            | "handle"
+            | "handler"
+            | "middleware"
+    )
+}
+
+/// Check if a file is a common entry point.
+fn is_entry_point_file(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let lower = filename.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "main.py"
+            | "main.rs"
+            | "main.go"
+            | "main.ts"
+            | "main.js"
+            | "index.ts"
+            | "index.js"
+            | "index.tsx"
+            | "index.jsx"
+            | "lib.rs"
+            | "mod.rs"
+            | "app.py"
+            | "app.ts"
+            | "app.js"
+            | "__init__.py"
+            | "setup.py"
+            | "conftest.py"
+            | "manage.py"
+            | "program.cs"
+            | "startup.cs"
+    )
+}
+
+/// Detect modules with zero incoming Imports edges (potential dead code).
+///
+/// Excludes entry points: main.py, index.ts, lib.rs, etc.
+fn detect_orphan_modules(
+    graph: &UnifiedGraph,
+    import_edges: &[(&str, &str, f64)],
+) -> Vec<Signal> {
+    use ising_core::graph::NodeType;
+
+    // Build set of all module IDs that are imported by someone
+    let mut imported_modules: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (_, target, _) in import_edges {
+        imported_modules.insert(target);
+    }
+
+    let mut signals = Vec::new();
+    for node_id in graph.node_ids() {
+        let _node = match graph.get_node(node_id) {
+            Some(n) if n.node_type == NodeType::Module => n,
+            _ => continue,
+        };
+
+        // Skip if this module is imported by anyone
+        if imported_modules.contains(node_id) {
+            continue;
+        }
+
+        // Skip entry point files
+        if is_entry_point_file(node_id) {
+            continue;
+        }
+
+        // Skip test files
+        if is_test_file(node_id) {
+            continue;
+        }
+
+        // Only flag if the module has been around long enough (has change metrics)
+        // but hasn't been changed recently — avoids flagging brand new files
+        let has_history = graph.change_metrics.contains_key(node_id);
+        if !has_history {
+            continue;
+        }
+
+        signals.push(Signal::new(
+            SignalType::OrphanModule,
+            node_id,
+            None,
+            0.3,
+            format!(
+                "Module '{}' is not imported by any other module — may be an unused entry point or dead code",
+                node_id
+            ),
+        ));
+    }
+    signals
+}
+
+/// Detect usage of deprecated symbols.
+///
+/// A deprecated function/class that is still being called or imported is a migration risk.
+fn detect_deprecated_usage(graph: &UnifiedGraph) -> Vec<Signal> {
+    let calls_edges = graph.edges_of_type(&EdgeType::Calls);
+    let import_edges = graph.edges_of_type(&EdgeType::Imports);
+
+    let mut signals = Vec::new();
+
+    // Check for calls to deprecated functions
+    for (caller, callee, _) in &calls_edges {
+        if let Some(node) = graph.get_node(callee)
+            && node.deprecated {
+                let callee_name = callee.rsplit("::").next().unwrap_or(callee);
+                signals.push(Signal::new(
+                    SignalType::DeprecatedUsage,
+                    caller,
+                    Some(callee),
+                    1.5,
+                    format!(
+                        "'{}' calls deprecated function '{}' — should be migrated",
+                        caller, callee_name
+                    ),
+                ));
+            }
+    }
+
+    // Check for imports of deprecated modules
+    for (importer, imported, _) in &import_edges {
+        if let Some(node) = graph.get_node(imported)
+            && node.deprecated {
+                signals.push(Signal::new(
+                    SignalType::DeprecatedUsage,
+                    importer,
+                    Some(imported),
+                    1.0,
+                    format!(
+                        "'{}' imports deprecated module '{}' — should be migrated",
+                        importer, imported
+                    ),
+                ));
+            }
+    }
+
+    signals
+}
+
+/// Detect stale code — modules/functions unchanged for a long period with low connectivity.
+///
+/// Distinguishes "stable" (heavily depended upon, unchanged) from "stale" (nobody depends
+/// on it, unchanged for > 12 months).
+fn detect_stale_code(graph: &UnifiedGraph) -> Vec<Signal> {
+    use ising_core::graph::NodeType;
+
+    // Parse last_changed timestamps and find the most recent commit in the repo
+    let now_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let stale_threshold_seconds: i64 = 365 * 86_400; // 1 year
+
+    let mut signals = Vec::new();
+
+    for node_id in graph.node_ids() {
+        let _node = match graph.get_node(node_id) {
+            Some(n) if n.node_type == NodeType::Module => n,
+            _ => continue,
+        };
+
+        let metrics = match graph.change_metrics.get(node_id) {
+            Some(m) => m,
+            None => continue, // No change data — can't assess staleness
+        };
+
+        // Parse last_changed
+        let last_changed_ts = metrics.last_changed.as_ref().and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.timestamp())
+        });
+
+        let age_seconds = match last_changed_ts {
+            Some(ts) => now_timestamp - ts,
+            None => continue, // Can't determine age
+        };
+
+        // Only flag if unchanged for > threshold
+        if age_seconds < stale_threshold_seconds {
+            continue;
+        }
+
+        // Check connectivity: count incoming edges (both imports and calls)
+        let import_edges = graph.edges_of_type(&EdgeType::Imports);
+        let calls_edges = graph.edges_of_type(&EdgeType::Calls);
+        let incoming_count = import_edges
+            .iter()
+            .filter(|(_, t, _)| *t == node_id)
+            .count()
+            + calls_edges
+                .iter()
+                .filter(|(_, t, _)| t.starts_with(node_id))
+                .count();
+
+        // If heavily depended upon (>3 importers), it's stable not stale
+        if incoming_count > 3 {
+            continue;
+        }
+
+        // Skip test files
+        if is_test_file(node_id) {
+            continue;
+        }
+
+        let months = age_seconds / (30 * 86_400);
+        signals.push(Signal::new(
+            SignalType::StaleCode,
+            node_id,
+            None,
+            0.3,
+            format!(
+                "Module '{}' unchanged for ~{} months with only {} dependent(s) — may be obsolete",
+                node_id, months, incoming_count
+            ),
+        ));
+    }
+
+    signals
+}
+
+/// Detect intra-file hotspots — functions that churn far more than their siblings.
+///
+/// Uses function-level change metrics (from proportional attribution) to find
+/// functions that have 3x or more churn than the median function in the same file.
+fn detect_intra_file_hotspots(graph: &UnifiedGraph) -> Vec<Signal> {
+    use ising_core::graph::NodeType;
+
+    // Group functions by their parent module
+    let contains_edges = graph.edges_of_type(&EdgeType::Contains);
+    let mut module_functions: std::collections::HashMap<&str, Vec<(&str, f64)>> =
+        std::collections::HashMap::new();
+
+    for (module_id, func_id, _) in &contains_edges {
+        if let Some(node) = graph.get_node(func_id)
+            && node.node_type != NodeType::Function {
+                continue;
+            }
+        let churn = graph
+            .change_metrics
+            .get(*func_id)
+            .map(|m| m.churn_lines as f64)
+            .unwrap_or(0.0);
+        module_functions
+            .entry(module_id)
+            .or_default()
+            .push((func_id, churn));
+    }
+
+    let mut signals = Vec::new();
+    let hotspot_ratio = 3.0;
+
+    for (module_id, funcs) in &module_functions {
+        if funcs.len() < 3 {
+            continue; // Need enough siblings for comparison
+        }
+
+        // Compute median churn
+        let mut churns: Vec<f64> = funcs.iter().map(|(_, c)| *c).collect();
+        churns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = churns[churns.len() / 2];
+
+        if median < 1.0 {
+            continue; // No meaningful churn to compare against
+        }
+
+        for (func_id, churn) in funcs {
+            if *churn > median * hotspot_ratio {
+                let func_name = func_id.rsplit("::").next().unwrap_or(func_id);
+                signals.push(Signal::new(
+                    SignalType::IntraFileHotspot,
+                    func_id,
+                    Some(module_id),
+                    (*churn / median).min(5.0),
+                    format!(
+                        "Function '{}' churns {:.1}x more than siblings in '{}' — consider extracting",
+                        func_name,
+                        churn / median,
+                        module_id
+                    ),
+                ));
+            }
+        }
+    }
+
+    signals
 }
 
 #[cfg(test)]
@@ -1464,6 +1850,246 @@ mod tests {
         assert!(!is_generated_code("vcs/git.go"));
         assert!(!is_generated_code("src/main.rs"));
         assert!(!is_generated_code("api/handler.ts"));
+    }
+
+    // --- OrphanFunction tests ---
+
+    #[test]
+    fn test_orphan_function_detected() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("app.py", "app.py"));
+        let f = Node::function("app.py::unused_helper", "app.py", 10, 20);
+        g.add_node(f);
+        g.add_edge("app.py", "app.py::unused_helper", EdgeType::Contains, 1.0)
+            .unwrap();
+        // No Calls edges pointing to this function
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanFunction),
+            "Function with no callers should be flagged as orphan"
+        );
+    }
+
+    #[test]
+    fn test_orphan_function_not_detected_when_called() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("app.py", "app.py"));
+        let f1 = Node::function("app.py::helper", "app.py", 10, 20);
+        let f2 = Node::function("app.py::main_fn", "app.py", 25, 40);
+        g.add_node(f1);
+        g.add_node(f2);
+        g.add_edge("app.py::main_fn", "app.py::helper", EdgeType::Calls, 1.0)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanFunction
+                    && s.node_a == "app.py::helper"),
+            "Function with callers should not be flagged as orphan"
+        );
+    }
+
+    #[test]
+    fn test_orphan_function_skips_entry_points() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("app.py", "app.py"));
+        let f = Node::function("app.py::main", "app.py", 1, 10);
+        g.add_node(f);
+        // No callers, but "main" is an entry point
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanFunction && s.node_a == "app.py::main"),
+            "Entry point functions should not be flagged as orphan"
+        );
+    }
+
+    // --- OrphanModule tests ---
+
+    #[test]
+    fn test_orphan_module_detected() {
+        use ising_core::graph::ChangeMetrics;
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("orphan.py", "orphan.py"));
+        g.change_metrics.insert(
+            "orphan.py".to_string(),
+            ChangeMetrics {
+                change_freq: 5,
+                ..Default::default()
+            },
+        );
+        // No import edges pointing to this module
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanModule),
+            "Module with no importers should be flagged as orphan"
+        );
+    }
+
+    #[test]
+    fn test_orphan_module_not_detected_when_imported() {
+        use ising_core::graph::ChangeMetrics;
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("lib.py", "lib.py"));
+        g.add_node(Node::module("app.py", "app.py"));
+        g.add_edge("app.py", "lib.py", EdgeType::Imports, 1.0)
+            .unwrap();
+        g.change_metrics.insert(
+            "lib.py".to_string(),
+            ChangeMetrics {
+                change_freq: 5,
+                ..Default::default()
+            },
+        );
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanModule && s.node_a == "lib.py"),
+            "Module with importers should not be flagged as orphan"
+        );
+    }
+
+    #[test]
+    fn test_orphan_module_skips_entry_points() {
+        use ising_core::graph::ChangeMetrics;
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("main.py", "main.py"));
+        g.change_metrics.insert(
+            "main.py".to_string(),
+            ChangeMetrics {
+                change_freq: 10,
+                ..Default::default()
+            },
+        );
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanModule && s.node_a == "main.py"),
+            "Entry point files should not be flagged as orphan modules"
+        );
+    }
+
+    // --- DeprecatedUsage tests ---
+
+    #[test]
+    fn test_deprecated_usage_via_calls() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("app.py", "app.py"));
+        let mut f = Node::function("lib.py::old_func", "lib.py", 10, 20);
+        f.deprecated = true;
+        g.add_node(f);
+        g.add_edge("app.py", "lib.py::old_func", EdgeType::Calls, 1.0)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::DeprecatedUsage),
+            "Calling a deprecated function should trigger DeprecatedUsage"
+        );
+    }
+
+    #[test]
+    fn test_deprecated_usage_via_imports() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("app.py", "app.py"));
+        let mut dep = Node::module("old_module.py", "old_module.py");
+        dep.deprecated = true;
+        g.add_node(dep);
+        g.add_edge("app.py", "old_module.py", EdgeType::Imports, 1.0)
+            .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::DeprecatedUsage),
+            "Importing a deprecated module should trigger DeprecatedUsage"
+        );
+    }
+
+    // --- IntraFileHotspot tests ---
+
+    #[test]
+    fn test_intra_file_hotspot_detected() {
+        use ising_core::graph::ChangeMetrics;
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("big.py", "big.py"));
+
+        // Add 4 functions: 3 normal, 1 hot
+        for i in 0..3 {
+            let fid = format!("big.py::func_{}", i);
+            let f = Node::function(&fid, "big.py", i * 10, i * 10 + 8);
+            g.add_node(f);
+            g.add_edge("big.py", &fid, EdgeType::Contains, 1.0).unwrap();
+            g.change_metrics.insert(
+                fid,
+                ChangeMetrics {
+                    churn_lines: 10,
+                    change_freq: 5,
+                    ..Default::default()
+                },
+            );
+        }
+        // Hot function: 50 churn vs median of 10 = 5x
+        let hot_id = "big.py::hot_func";
+        let f = Node::function(hot_id, "big.py", 30, 38);
+        g.add_node(f);
+        g.add_edge("big.py", hot_id, EdgeType::Contains, 1.0)
+            .unwrap();
+        g.change_metrics.insert(
+            hot_id.to_string(),
+            ChangeMetrics {
+                churn_lines: 50,
+                change_freq: 20,
+                ..Default::default()
+            },
+        );
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::IntraFileHotspot
+                    && s.node_a == "big.py::hot_func"),
+            "Function with 5x median churn should be flagged as intra-file hotspot"
+        );
+    }
+
+    // --- Entry point helpers tests ---
+
+    #[test]
+    fn test_is_entry_point_function_common_names() {
+        assert!(is_entry_point_function("main"));
+        assert!(is_entry_point_function("__init__"));
+        assert!(is_entry_point_function("setup"));
+        assert!(!is_entry_point_function("process_data"));
+        assert!(!is_entry_point_function("calculate"));
+    }
+
+    #[test]
+    fn test_is_entry_point_file_common_names() {
+        assert!(is_entry_point_file("main.py"));
+        assert!(is_entry_point_file("src/index.ts"));
+        assert!(is_entry_point_file("lib.rs"));
+        assert!(is_entry_point_file("__init__.py"));
+        assert!(!is_entry_point_file("utils.py"));
+        assert!(!is_entry_point_file("src/handler.rs"));
     }
 
     #[test]

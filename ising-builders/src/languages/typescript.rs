@@ -1,6 +1,6 @@
 //! TypeScript/JavaScript AST extraction via Tree-sitter.
 
-use super::{ClassInfo, FunctionInfo, ImportInfo};
+use super::{CallInfo, ClassInfo, FunctionInfo, ImportInfo};
 
 /// Extract TypeScript/JavaScript functions, classes, and imports from a tree-sitter parse tree.
 ///
@@ -76,6 +76,51 @@ pub fn extract_nodes_with_offset(
     }
 }
 
+/// Check if a node has a `@deprecated` JSDoc comment preceding it.
+fn has_deprecated_jsdoc(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    if let Some(prev) = node.prev_sibling() {
+        if prev.kind() == "comment" {
+            let text = prev
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .to_lowercase();
+            if text.contains("@deprecated") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Extract function calls from within a function body.
+fn extract_calls_from_body(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
+    let mut calls = Vec::new();
+    fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
+        if node.kind() == "call_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee = func_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
+                if !callee.is_empty() {
+                    calls.push(CallInfo {
+                        callee,
+                        line: node.start_position().row as u32 + 1,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_calls(child, source, calls);
+        }
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        walk_calls(body, source, &mut calls);
+    }
+    calls
+}
+
 /// Extract a function_declaration or method_definition node.
 fn extract_function(
     node: tree_sitter::Node<'_>,
@@ -89,11 +134,15 @@ fn extract_function(
             .unwrap_or("")
             .to_string();
         let complexity = compute_complexity(node);
+        let deprecated = has_deprecated_jsdoc(node, source);
+        let calls = extract_calls_from_body(node, source);
         functions.push(FunctionInfo {
             name,
             line_start: node.start_position().row as u32 + 1 + line_offset,
             line_end: node.end_position().row as u32 + 1 + line_offset,
             complexity,
+            calls,
+            deprecated,
         });
     }
 }
@@ -111,11 +160,13 @@ fn extract_class(
             .unwrap_or("")
             .to_string();
         let complexity = compute_complexity(node);
+        let deprecated = has_deprecated_jsdoc(node, source);
         classes.push(ClassInfo {
             name,
             line_start: node.start_position().row as u32 + 1 + line_offset,
             line_end: node.end_position().row as u32 + 1 + line_offset,
             complexity,
+            deprecated,
         });
     }
 }
@@ -149,12 +200,17 @@ fn extract_arrow_or_fn_expr(
                 .utf8_text(source.as_bytes())
                 .unwrap_or("")
                 .to_string();
-            let complexity = compute_complexity(value.unwrap());
+            let fn_node = value.unwrap();
+            let complexity = compute_complexity(fn_node);
+            let deprecated = has_deprecated_jsdoc(node, source);
+            let calls = extract_calls_from_body(fn_node, source);
             functions.push(FunctionInfo {
                 name,
                 line_start: node.start_position().row as u32 + 1 + line_offset,
                 line_end: node.end_position().row as u32 + 1 + line_offset,
                 complexity,
+                calls,
+                deprecated,
             });
         }
     }

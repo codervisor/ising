@@ -47,6 +47,8 @@ fn walk_node(
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls: Vec::new(),
+                        deprecated: false,
                     });
                 }
             }
@@ -67,6 +69,8 @@ fn walk_node(
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls: Vec::new(),
+                        deprecated: false,
                     });
                 }
             }
@@ -85,6 +89,7 @@ fn walk_node(
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated: false,
                     });
                     // Recurse into class body for methods
                     if let Some(body) = child.child_by_field_name("body") {

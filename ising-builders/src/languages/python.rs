@@ -1,6 +1,6 @@
 //! Python AST extraction via Tree-sitter.
 
-use super::{ClassInfo, FunctionInfo, ImportInfo};
+use super::{CallInfo, ClassInfo, FunctionInfo, ImportInfo};
 use std::path::{Path, PathBuf};
 
 /// Extract Python functions, classes, and imports from a tree-sitter parse tree.
@@ -22,11 +22,15 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_decorator(child, source);
+                    let calls = extract_calls(child, source);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls,
+                        deprecated,
                     });
                 }
             }
@@ -37,11 +41,13 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_decorator(child, source);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated,
                     });
                 }
             }
@@ -94,6 +100,53 @@ pub fn extract_nodes(
             _ => {}
         }
     }
+}
+
+/// Check if a function or class has a `@deprecated` or `@typing.deprecated` decorator.
+fn has_deprecated_decorator(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "decorator" {
+            let text = child
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .to_lowercase();
+            if text.contains("deprecated") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Extract function calls from within a function body.
+fn extract_calls(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
+    let mut calls = Vec::new();
+    fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
+        if node.kind() == "call" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee = func_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
+                if !callee.is_empty() {
+                    calls.push(CallInfo {
+                        callee,
+                        line: node.start_position().row as u32 + 1,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_calls(child, source, calls);
+        }
+    }
+    // Walk the function body (skip parameters, decorators, etc.)
+    if let Some(body) = node.child_by_field_name("body") {
+        walk_calls(body, source, &mut calls);
+    }
+    calls
 }
 
 /// Resolve a Python import to a relative file path.

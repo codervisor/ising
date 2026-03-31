@@ -1,6 +1,6 @@
 //! Rust AST extraction via Tree-sitter.
 
-use super::{ClassInfo, FunctionInfo, ImportInfo};
+use super::{CallInfo, ClassInfo, FunctionInfo, ImportInfo};
 use std::path::Path;
 
 /// Extract Rust functions, structs, enums, traits, impl methods, and imports
@@ -23,11 +23,15 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_attribute(child, source);
+                    let calls = extract_calls(child, source);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls,
+                        deprecated,
                     });
                 }
             }
@@ -38,11 +42,13 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_attribute(child, source);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated,
                     });
                 }
             }
@@ -53,11 +59,13 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_attribute(child, source);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated,
                     });
                 }
             }
@@ -68,11 +76,13 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_attribute(child, source);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated,
                     });
                 }
             }
@@ -101,11 +111,15 @@ pub fn extract_nodes(
                                 format!("{}::{}", impl_type, method_name)
                             };
                             let complexity = compute_complexity(item);
+                            let deprecated = has_deprecated_attribute(item, source);
+                            let calls = extract_calls(item, source);
                             functions.push(FunctionInfo {
                                 name,
                                 line_start: item.start_position().row as u32 + 1,
                                 line_end: item.end_position().row as u32 + 1,
                                 complexity,
+                                calls,
+                                deprecated,
                             });
                         }
                     }
@@ -188,6 +202,74 @@ pub fn resolve_use_import(use_text: &str) -> Option<String> {
     // Map path components to file system: foo::bar → src/foo/bar.rs
     let file_path = format!("src/{}.rs", path.replace("::", "/"));
     Some(file_path)
+}
+
+/// Check if a Rust item has a `#[deprecated]` attribute.
+fn has_deprecated_attribute(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    // Check preceding siblings for attribute_item containing "deprecated"
+    let mut sibling = node.prev_sibling();
+    while let Some(s) = sibling {
+        if s.kind() == "attribute_item" || s.kind() == "inner_attribute_item" {
+            let text = s
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .to_lowercase();
+            if text.contains("deprecated") {
+                return true;
+            }
+        } else if s.kind() != "line_comment" && s.kind() != "block_comment" {
+            break; // Stop at non-attribute, non-comment siblings
+        }
+        sibling = s.prev_sibling();
+    }
+    false
+}
+
+/// Extract function calls from within a function body.
+fn extract_calls(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
+    let mut calls = Vec::new();
+    fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
+        match node.kind() {
+            "call_expression" => {
+                if let Some(func_node) = node.child_by_field_name("function") {
+                    let callee = func_node
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .to_string();
+                    if !callee.is_empty() {
+                        calls.push(CallInfo {
+                            callee,
+                            line: node.start_position().row as u32 + 1,
+                        });
+                    }
+                }
+            }
+            "macro_invocation" => {
+                // e.g., println!(), vec![], format!()
+                if let Some(macro_node) = node.child_by_field_name("macro") {
+                    let callee = macro_node
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .to_string();
+                    if !callee.is_empty() {
+                        calls.push(CallInfo {
+                            callee: format!("{}!", callee),
+                            line: node.start_position().row as u32 + 1,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_calls(child, source, calls);
+        }
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        walk_calls(body, source, &mut calls);
+    }
+    calls
 }
 
 /// Compute cyclomatic complexity for Rust code.
