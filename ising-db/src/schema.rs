@@ -114,6 +114,29 @@ impl Database {
             DROP TABLE IF EXISTS stress_data;
             ",
         )?;
+
+        // Migration: add deprecated column to existing nodes tables
+        self.migrate_add_column("nodes", "deprecated", "BOOLEAN DEFAULT 0")?;
+
+        Ok(())
+    }
+
+    /// Add a column to a table if it doesn't already exist.
+    fn migrate_add_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), DbError> {
+        let sql = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let has_column = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .any(|name| name.is_ok_and(|n| n == column));
+        if !has_column {
+            let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+            self.conn.execute(&alter, [])?;
+        }
         Ok(())
     }
 

@@ -87,13 +87,65 @@ fn attribute_changes_to_functions(graph: &mut UnifiedGraph) {
 
         let module_loc = graph.get_node(module_id).and_then(|n| n.loc).unwrap_or(1) as f64;
 
-        for (child_id, start, end) in children {
-            let child_lines = (end.saturating_sub(*start) + 1) as f64;
-            let proportion = (child_lines / module_loc).min(1.0);
+        // Compute proportions for all children first
+        let proportions: Vec<(String, f64)> = children
+            .iter()
+            .map(|(child_id, start, end)| {
+                let child_lines = (end.saturating_sub(*start) + 1) as f64;
+                let proportion = (child_lines / module_loc).min(1.0);
+                (child_id.clone(), proportion)
+            })
+            .collect();
 
-            // Attribute proportionally
-            let child_change_freq = (metrics.change_freq as f64 * proportion).ceil() as u32;
-            let child_churn = (metrics.churn_lines as f64 * proportion).ceil() as u32;
+        // Use floor + distribute remainder to preserve module-level totals
+        let total_freq = metrics.change_freq;
+        let total_churn = metrics.churn_lines;
+
+        let mut freq_floors: Vec<u32> = proportions
+            .iter()
+            .map(|(_, p)| (total_freq as f64 * p).floor() as u32)
+            .collect();
+        let mut churn_floors: Vec<u32> = proportions
+            .iter()
+            .map(|(_, p)| (total_churn as f64 * p).floor() as u32)
+            .collect();
+
+        // Distribute remainders to children with largest fractional parts
+        let freq_remainder = total_freq.saturating_sub(freq_floors.iter().sum());
+        let churn_remainder = total_churn.saturating_sub(churn_floors.iter().sum());
+
+        if freq_remainder > 0 {
+            let mut frac_indices: Vec<(usize, f64)> = proportions
+                .iter()
+                .enumerate()
+                .map(|(i, (_, p))| {
+                    let frac = (total_freq as f64 * p) - (total_freq as f64 * p).floor();
+                    (i, frac)
+                })
+                .collect();
+            frac_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for &(i, _) in frac_indices.iter().take(freq_remainder as usize) {
+                freq_floors[i] += 1;
+            }
+        }
+        if churn_remainder > 0 {
+            let mut frac_indices: Vec<(usize, f64)> = proportions
+                .iter()
+                .enumerate()
+                .map(|(i, (_, p))| {
+                    let frac = (total_churn as f64 * p) - (total_churn as f64 * p).floor();
+                    (i, frac)
+                })
+                .collect();
+            frac_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for &(i, _) in frac_indices.iter().take(churn_remainder as usize) {
+                churn_floors[i] += 1;
+            }
+        }
+
+        for (i, (child_id, proportion)) in proportions.iter().enumerate() {
+            let child_change_freq = freq_floors[i];
+            let child_churn = churn_floors[i];
             let child_churn_rate = if child_change_freq > 0 {
                 child_churn as f64 / child_change_freq as f64
             } else {
@@ -107,7 +159,7 @@ fn attribute_changes_to_functions(graph: &mut UnifiedGraph) {
                     churn_lines: child_churn,
                     churn_rate: child_churn_rate,
                     hotspot_score: metrics.hotspot_score * proportion,
-                    sum_coupling: 0.0, // Functions don't have co-change coupling yet
+                    sum_coupling: 0.0,
                     last_changed: metrics.last_changed.clone(),
                 },
             ));
