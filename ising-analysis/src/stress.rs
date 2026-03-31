@@ -512,7 +512,7 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
 
     let mut scores: Vec<f64> = active.iter().map(|n| n.direct_score).collect();
     scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median_direct_score = if scores.len() % 2 == 0 && scores.len() >= 2 {
+    let median_direct_score = if scores.len().is_multiple_of(2) && scores.len() >= 2 {
         (scores[scores.len() / 2 - 1] + scores[scores.len() / 2]) / 2.0
     } else {
         scores[scores.len() / 2]

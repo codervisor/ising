@@ -61,7 +61,7 @@ impl std::fmt::Display for SafetyZone {
 /// RiskTier is derived from the distribution of `direct_score = change_load / capacity`
 /// within each specific graph. This makes it self-calibrating across languages, architectures,
 /// and graph densities — like auto-exposure in a camera.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskTier {
     /// Top 1% by direct risk — immediate attention needed.
@@ -71,6 +71,7 @@ pub enum RiskTier {
     /// Top 5–15% — moderate risk.
     Medium,
     /// Bottom 85% — normal.
+    #[default]
     Normal,
 }
 
@@ -120,12 +121,6 @@ pub struct NodeRisk {
     /// Percentile rank within the graph (100 = highest risk, 0 = lowest).
     #[serde(default)]
     pub percentile: f64,
-}
-
-impl Default for RiskTier {
-    fn default() -> Self {
-        RiskTier::Normal
-    }
 }
 
 /// A complete risk field across the graph.
