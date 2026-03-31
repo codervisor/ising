@@ -676,7 +676,7 @@ fn detect_systemic_complexity(node_ids: &[String], graph: &UnifiedGraph) -> Vec<
     // Severity: how far above the thresholds are we?
     let complexity_ratio = (median as f64 / MEDIAN_COMPLEXITY_THRESHOLD as f64)
         .max(p75 as f64 / P75_COMPLEXITY_THRESHOLD as f64);
-    let severity = (complexity_ratio - 1.0).max(0.1).min(3.0);
+    let severity = (complexity_ratio - 1.0).clamp(0.1, 3.0);
 
     let mut signals = Vec::new();
 
