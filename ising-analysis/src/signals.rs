@@ -143,6 +143,10 @@ fn detect_ghost_coupling(
             || is_test_source_pair(a, b)
             || !is_source_file(a)
             || !is_source_file(b)
+            // GAP-13: Go package-level imports resolve to all files in a directory,
+            // so two .go files in the same package co-change without structural edges.
+            // This is normal Go packaging, not a hidden dependency.
+            || is_go_intra_package_pair(a, b)
         {
             continue;
         }
@@ -1484,6 +1488,126 @@ mod tests {
                 .iter()
                 .any(|s| s.signal_type == SignalType::GodModule),
             "Generated .pb.go files should not trigger GodModule"
+        );
+    }
+
+    #[test]
+    fn test_ghost_coupling_suppressed_go_intra_package() {
+        // Two .go files in the same directory (same Go package) co-change
+        // without structural edges. This is normal Go packaging — not a
+        // hidden dependency — so ghost coupling should be suppressed.
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module(
+            "pkg/server/handler.go",
+            "pkg/server/handler.go",
+        ));
+        g.add_node(Node::module("pkg/server/routes.go", "pkg/server/routes.go"));
+        g.add_edge(
+            "pkg/server/handler.go",
+            "pkg/server/routes.go",
+            EdgeType::CoChanges,
+            0.8,
+        )
+        .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling),
+            "Go files in the same package should not trigger GhostCoupling"
+        );
+    }
+
+    #[test]
+    fn test_ghost_coupling_not_suppressed_go_cross_package() {
+        // Two .go files in different directories should still trigger
+        // ghost coupling if they co-change without structural edges.
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module(
+            "pkg/server/handler.go",
+            "pkg/server/handler.go",
+        ));
+        g.add_node(Node::module("pkg/client/client.go", "pkg/client/client.go"));
+        g.add_edge(
+            "pkg/server/handler.go",
+            "pkg/client/client.go",
+            EdgeType::CoChanges,
+            0.8,
+        )
+        .unwrap();
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::GhostCoupling),
+            "Go files in different packages should still trigger GhostCoupling"
+        );
+    }
+
+    #[test]
+    fn test_systemic_complexity_detected() {
+        // Create a codebase with 60 modules all having elevated complexity.
+        // Median complexity ≥ 15 should trigger SystemicComplexity.
+        let mut g = UnifiedGraph::new();
+        for i in 0..60 {
+            let id = format!("src/mod_{i}.py");
+            let mut node = Node::module(id.clone(), id.clone());
+            node.complexity = Some(20); // above median threshold of 15
+            node.loc = Some(200);
+            g.add_node(node);
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::SystemicComplexity),
+            "Elevated median complexity across 60+ modules should trigger SystemicComplexity"
+        );
+    }
+
+    #[test]
+    fn test_systemic_complexity_not_detected_low_complexity() {
+        // 60 modules with low complexity should NOT trigger SystemicComplexity.
+        let mut g = UnifiedGraph::new();
+        for i in 0..60 {
+            let id = format!("src/mod_{i}.py");
+            let mut node = Node::module(id.clone(), id.clone());
+            node.complexity = Some(5); // below median threshold of 15
+            node.loc = Some(50);
+            g.add_node(node);
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::SystemicComplexity),
+            "Low median complexity should not trigger SystemicComplexity"
+        );
+    }
+
+    #[test]
+    fn test_systemic_complexity_not_detected_too_few_modules() {
+        // Fewer than 50 modules should not trigger SystemicComplexity,
+        // even if complexity is high.
+        let mut g = UnifiedGraph::new();
+        for i in 0..30 {
+            let id = format!("src/mod_{i}.py");
+            let mut node = Node::module(id.clone(), id.clone());
+            node.complexity = Some(25);
+            node.loc = Some(300);
+            g.add_node(node);
+        }
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::SystemicComplexity),
+            "Fewer than 50 modules should not trigger SystemicComplexity"
         );
     }
 }

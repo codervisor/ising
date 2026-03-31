@@ -65,7 +65,7 @@ Grade thresholds: A ≥ 0.85, B ≥ 0.70, C ≥ 0.55, D ≥ 0.40, F < 0.40.
 ### Known detector blind spots
 
 - **Odoo gets A** -- god module thresholds (complexity≥50, LOC≥500, CBO≥15) miss distributed complexity across thousands of moderately-complex files. **Partially addressed**: `SystemicComplexity` signal now detects elevated median/P75 complexity. Validate against Odoo to confirm grade impact.
-- **Go repos over-penalized** -- package-level imports inflate ghost coupling and unnecessary abstraction counts (GAP-13). **Partially addressed**: Go intra-package pairs now suppressed in unnecessary abstraction detection.
+- **Go repos over-penalized** -- package-level imports inflate ghost coupling and unnecessary abstraction counts (GAP-13). **Addressed**: Go intra-package pairs now suppressed in both ghost coupling and unnecessary abstraction detection.
 - **API stability not measured** -- breaking changes, deprecation frequency, interface churn are invisible to the tool.
 
 ## Analytical Discipline

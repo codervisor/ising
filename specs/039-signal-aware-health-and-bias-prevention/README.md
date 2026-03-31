@@ -129,7 +129,7 @@ We ran the formula against 12 real repos and checked whether the grades are defe
 | Bias | Problem | Status |
 |---|---|---|
 | **God module thresholds** | Hard-coded complexity≥50 misses Odoo's distributed complexity | **Partially addressed**: `SystemicComplexity` signal detects elevated median/P75 complexity. Validate against Odoo to confirm grade impact. |
-| **Go signal inflation** | Go packages produce more ghost coupling/unnecessary abstraction signals | **Partially addressed**: Go intra-package pairs suppressed in unnecessary abstraction (GAP-13). Ghost coupling still inflated. |
+| **Go signal inflation** | Go packages produce more ghost coupling/unnecessary abstraction signals | **Addressed**: Go intra-package pairs suppressed in both ghost coupling and unnecessary abstraction detection (GAP-13). |
 | **Missing signal types** | API stability, breaking changes, test coverage not measured | Would need new data sources |
 | **Signal weight magnitudes** | 4x for cycles vs 1x for ghost coupling is engineering judgment | Would need defect correlation study to validate |
 | **Time window sensitivity** | Different `--since` windows produce different change_load distributions | Inherent to the approach; documented but not solved |
@@ -149,7 +149,7 @@ Grade A does NOT mean: "This codebase is well-maintained" or "This codebase has 
 - Added `SignalSummary` struct and `summarize_signals()` function
 - Added `SystemicComplexity` signal type and `detect_systemic_complexity()` detection
 - Added `systemic_complexity_count` to `SignalSummary`
-- Added `is_go_intra_package_pair()` for Go unnecessary abstraction suppression (GAP-13)
+- Added `is_go_intra_package_pair()` for Go ghost coupling and unnecessary abstraction suppression (GAP-13)
 - Fixed `is_source_file()` to include all supported extensions (`.vue`, `.php`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`, `.kts`, `.csx`)
 - Expanded `is_generated_code()` with Django migrations, Rails schema, Alembic, vendor/third_party patterns
 
@@ -183,5 +183,5 @@ Grade A does NOT mean: "This codebase is well-maintained" or "This codebase has 
 
 1. ~~**New signal: systemic complexity**~~ — **DONE.** `SystemicComplexity` signal detects elevated median/P75 complexity (≥15 median or ≥30 P75 across 50+ modules). Integrated into health index at 2.5x flat weight. Validate against Odoo to confirm grade impact.
 2. **Defect correlation study** — validate signal weights against actual defect rates across repos. Currently the weights are assumptions.
-3. ~~**Go-specific signal calibration**~~ — **Partially done.** Go intra-package pairs suppressed in unnecessary abstraction detection. Ghost coupling false positives in Go repos still need a correction factor.
+3. ~~**Go-specific signal calibration**~~ — **Done.** Go intra-package pairs suppressed in both unnecessary abstraction and ghost coupling detection (GAP-13).
 4. **API stability signal** — measure breaking changes, deprecation frequency, interface churn. Would catch LangChain's failure mode if it exists.

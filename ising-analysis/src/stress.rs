@@ -449,19 +449,21 @@ fn assign_risk_tiers(nodes: &mut [NodeRisk]) {
 ///
 /// Combines three independent sub-scores to avoid bias from any single metric:
 ///
-/// 1. **Risk sub-score** (weight 0.40): avg direct risk + concentration.
-///    Amplified by 5x to spread the distribution (without this, large repos
-///    always converge to ~1.0 because avg_direct_score → 0 at scale).
+/// 1. **Risk sub-score** (weight 0.40): median direct_score + concentration.
+///    Uses median (not mean) to resist outlier domination in small repos.
+///    Amplified by 5x to spread the distribution.
 ///
-/// 2. **Signal sub-score** (weight 0.35): density of architectural signals
-///    (god modules, ticking bombs, fragile boundaries) per module.
-///    Uses density rather than absolute counts to prevent scale bias.
+/// 2. **Signal sub-score** (weight 0.35): weighted architectural signals
+///    normalized by sqrt(total_modules). sqrt normalization prevents large
+///    repos from hiding behind their denominator (same principle as TF-IDF).
+///    SystemicComplexity uses a flat 2.5x weight (not sqrt-normalized).
 ///
-/// 3. **Structural sub-score** (weight 0.25): fraction of modules entangled
-///    in dependency cycles or unstable dependency violations.
+/// 3. **Structural sub-score** (weight 0.25): cycle + unstable dependency
+///    entanglement, also sqrt-normalized.
 ///
 /// Bias prevention:
-/// - Density metrics (per-module) instead of absolute counts → scale-invariant
+/// - Median instead of mean → resistant to outlier domination
+/// - sqrt(N) normalization instead of count/N → sub-linear, scale-fair
 /// - Sub-score decomposition → transparent what drives the grade
 /// - Caveats emitted when data is insufficient → honest about limitations
 fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIndex {
