@@ -123,11 +123,11 @@ fn walk_node(
                 }
             }
             _ => {
-                // Recurse into program and other container nodes
-                if child.kind() == "program"
-                    || child.kind() == "declaration_list"
-                    || child.kind() == "compound_statement"
-                {
+                // Recurse into any container node that may hold declarations.
+                // The previous allowlist (program, declaration_list, compound_statement)
+                // missed nodes like expression_statement, if_statement, and other
+                // wrappers, causing 0 nodes extracted on repos like php-src.
+                if child.named_child_count() > 0 {
                     walk_node(
                         child,
                         source,
@@ -245,42 +245,45 @@ fn read_composer_psr4(repo_path: &Path) -> Vec<(String, String)> {
 }
 
 /// Compute cyclomatic complexity for PHP code.
+/// Uses an iterative traversal with an explicit stack to avoid stack overflow
+/// on deeply nested ASTs.
 fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
-    let mut decisions = 0;
-    fn walk(node: tree_sitter::Node<'_>, decisions: &mut u32) {
-        match node.kind() {
+    let mut decisions = 0u32;
+    let mut stack = vec![node];
+
+    while let Some(current) = stack.pop() {
+        match current.kind() {
             "if_statement" | "for_statement" | "foreach_statement" | "while_statement"
             | "do_statement" | "catch_clause" => {
-                *decisions += 1;
+                decisions += 1;
             }
             "case_statement" => {
-                // Count case but not default
-                let text = node.utf8_text(&[]).unwrap_or("");
+                let text = current.utf8_text(&[]).unwrap_or("");
                 if !text.starts_with("default") {
-                    *decisions += 1;
+                    decisions += 1;
                 }
             }
             "match_conditional_expression" => {
-                *decisions += 1;
+                decisions += 1;
             }
             "binary_expression" => {
-                if let Some(op) = node.child_by_field_name("operator") {
+                if let Some(op) = current.child_by_field_name("operator") {
                     let op_text = op.kind();
                     if op_text == "&&" || op_text == "||" || op_text == "and" || op_text == "or" {
-                        *decisions += 1;
+                        decisions += 1;
                     }
                 }
             }
             "conditional_expression" => {
-                *decisions += 1;
+                decisions += 1;
             }
             _ => {}
         }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, decisions);
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
         }
     }
-    walk(node, &mut decisions);
+
     1 + decisions
 }

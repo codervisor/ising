@@ -279,40 +279,44 @@ fn detect_rails(repo_path: &Path) -> bool {
 }
 
 /// Compute cyclomatic complexity for Ruby code.
+/// Uses an iterative traversal with an explicit stack to avoid stack overflow
+/// on deeply nested ASTs (e.g., large Rails files).
 fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
-    let mut decisions = 0;
-    fn walk(node: tree_sitter::Node<'_>, decisions: &mut u32) {
-        match node.kind() {
+    let mut decisions = 0u32;
+    let mut stack = vec![node];
+
+    while let Some(current) = stack.pop() {
+        match current.kind() {
             "if" | "unless" | "if_modifier" | "unless_modifier" => {
-                *decisions += 1;
+                decisions += 1;
             }
             "for" | "while" | "until" | "while_modifier" | "until_modifier" => {
-                *decisions += 1;
+                decisions += 1;
             }
             "when" | "in_pattern" => {
-                *decisions += 1;
+                decisions += 1;
             }
             "rescue" => {
-                *decisions += 1;
+                decisions += 1;
             }
             "binary" => {
-                if let Some(op) = node.child_by_field_name("operator") {
+                if let Some(op) = current.child_by_field_name("operator") {
                     let op_text = op.utf8_text(&[]).unwrap_or("");
                     if op_text == "&&" || op_text == "||" || op_text == "and" || op_text == "or" {
-                        *decisions += 1;
+                        decisions += 1;
                     }
                 }
             }
             "conditional" => {
-                *decisions += 1;
+                decisions += 1;
             }
             _ => {}
         }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, decisions);
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
         }
     }
-    walk(node, &mut decisions);
+
     1 + decisions
 }
