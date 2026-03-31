@@ -1,7 +1,22 @@
+---
+status: complete
+created: 2026-03-31
+priority: medium
+tags:
+  - validation
+  - benchmark
+  - oss-repos
+  - health-index
+  - signals
+depends_on:
+  - 039-signal-aware-health-and-bias-prevention
+  - 037-oss-validation-round4-ai-repos
+---
+
 # Spec 042: OSS Validation Round 5 — Expanded Benchmark
 
 **Date**: 2026-03-31
-**Repos tested**: 28 (24 succeeded, 4 failed)
+**Repos tested**: 29 (25 succeeded, 4 failed)
 **Languages covered**: Python, JS/TS, Go, Java, Rust, C/C++, Ruby, PHP
 
 ## Purpose
@@ -9,7 +24,7 @@
 Aggressive expansion of the validation test set from 12 repos to 28, covering:
 - Previously tested repos (for regression comparison)
 - New challengers across different languages, sizes, and architectures
-- Massive monorepos (kubernetes, rust-lang, TypeScript)
+- Massive monorepos (e.g., kubernetes and large JS/TS codebases)
 - Diverse architectural patterns (DI frameworks, compilers, distributed systems)
 
 ## Results Table
@@ -33,6 +48,7 @@ kubernetes                Go       challngr     C   0.63   17116    5461   0.92 
 kafka                     Java     challngr     C   0.59    6137    6128   0.89   0.27   0.57   23904    62   245
 spring-boot               Java     challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
 TypeScript                JS/TS    challngr     A   0.98   39421   26727   0.95   1.00   1.00    2257   268  1069
+rust                      Rust     challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
 deno                      Rust     challngr     A   0.94    4982    4909   0.97   0.87   0.99    5775    50   196
 pytorch                   C++/Py   challngr     B   0.72    9070    8913   0.91   0.44   0.80   31448    90   356
 transformers              Python   prev         C   0.62    4316    3837   0.74   0.32   0.85    5194    39   153
@@ -51,9 +67,9 @@ php-src                   C        challngr  FAIL   ---     ---     ---    ---  
 
 | Grade | Count | Repos |
 |-------|-------|-------|
-| A | 12 | django-rest-framework, fastapi, fastify, nest, next.js, svelte, TypeScript, deno, llama.cpp, langchain, odoo |
-| B | 7 | django, express, gin, ollama, prometheus, pytorch, open-webui, ha-core |
-| C | 5 | flask, kubernetes, kafka, transformers, vllm, grafana |
+| A | 11 | django-rest-framework, fastapi, fastify, nest, next.js, svelte, TypeScript, deno, llama.cpp, langchain, odoo |
+| B | 8 | django, express, gin, ollama, prometheus, pytorch, open-webui, ha-core |
+| C | 6 | flask, kubernetes, kafka, transformers, vllm, grafana |
 | FAIL | 4 | spring-boot, rust, rails, php-src |
 
 ## Calibration Check Results
