@@ -50,11 +50,14 @@ weighted = (god_count / sqrt_n) * 3.0
          + (shotgun_count / sqrt_n) * 1.5
          + (unstable_count / sqrt_n) * 2.0
          + (ghost_count / sqrt_n) * 1.0
+         + systemic_complexity_count * 2.5
 
 signal_sub = 1.0 / (1.0 + weighted * 0.3)
 ```
 
 **Uses sqrt(N) normalization, not density (count/N).** This is the same principle as TF-IDF document frequency normalization. Pure density lets large repos hide: 131 god modules / 15,000 = 0.87% looks fine. With sqrt: 131/122 = 1.07, which correctly reflects that 131 god modules is a lot.
+
+Note: `systemic_complexity_count` is NOT divided by sqrt(N) because it's a codebase-level signal (at most 1 per repo), not a per-module signal.
 
 | Repo | god_count/N | god_count/sqrt(N) | Better? |
 |---|---|---|---|
@@ -75,6 +78,7 @@ structural_sub = 1.0 / (1.0 + entanglement * 0.5)
 | Cycles | 4.0 | Hardest to fix; cascading rebuild/test impacts |
 | God modules | 3.0 | Strongest defect density correlate |
 | Ticking bombs | 3.0 | Triple threat: hotspot + defect + coupling |
+| Systemic complexity | 2.5 | Codebase-level distributed complexity (flat, not sqrt-normalized) |
 | Fragile boundary | 2.0 | Active breakage pattern |
 | Unstable deps | 2.0 | Stability principle violation |
 | Shotgun surgery | 1.5 | Change amplification |
@@ -103,7 +107,7 @@ We ran the formula against 12 real repos and checked whether the grades are defe
 
 ### Known inaccuracies
 
-**Odoo gets A (94%) despite being notoriously complex.** With 14,178 modules, only 4 trigger god module detection (complexity≥50, LOC≥500, CBO≥15). Odoo's complexity is systemic — distributed across thousands of moderately-complex files rather than concentrated in a few giant ones. Our signal detector literally cannot see this pattern. No formula adjustment will fix this; the detector itself needs new signal types (e.g., "systemic complexity" when median complexity is high).
+**Odoo gets A (94%) despite being notoriously complex.** With 14,178 modules, only 4 trigger god module detection (complexity≥50, LOC≥500, CBO≥15). Odoo's complexity is systemic — distributed across thousands of moderately-complex files rather than concentrated in a few giant ones. **Partially addressed**: the new `SystemicComplexity` signal detects elevated median/P75 complexity, which should fire for Odoo's pattern. Needs re-validation to confirm grade impact.
 
 **LangChain gets A (96%) with only 3 signals.** Either LangChain is genuinely well-structured (its heavily modular design is intentional) or our signals miss its failure mode (rapid API churn, unstable interfaces across versions). We don't measure API stability or breaking change frequency — that's a gap.
 
@@ -122,10 +126,10 @@ We ran the formula against 12 real repos and checked whether the grades are defe
 
 ### Biases we did NOT fix
 
-| Bias | Problem | Why unfixed |
+| Bias | Problem | Status |
 |---|---|---|
-| **God module thresholds** | Hard-coded complexity≥50 misses Odoo's distributed complexity | Requires new signal type, not formula tuning |
-| **Go signal inflation** | Go packages produce more ghost coupling/unnecessary abstraction signals | GAP-13 partially mitigated but not fully solved |
+| **God module thresholds** | Hard-coded complexity≥50 misses Odoo's distributed complexity | **Partially addressed**: `SystemicComplexity` signal detects elevated median/P75 complexity. Validate against Odoo to confirm grade impact. |
+| **Go signal inflation** | Go packages produce more ghost coupling/unnecessary abstraction signals | **Partially addressed**: Go intra-package pairs suppressed in unnecessary abstraction (GAP-13). Ghost coupling still inflated. |
 | **Missing signal types** | API stability, breaking changes, test coverage not measured | Would need new data sources |
 | **Signal weight magnitudes** | 4x for cycles vs 1x for ghost coupling is engineering judgment | Would need defect correlation study to validate |
 | **Time window sensitivity** | Different `--since` windows produce different change_load distributions | Inherent to the approach; documented but not solved |
@@ -143,10 +147,16 @@ Grade A does NOT mean: "This codebase is well-maintained" or "This codebase has 
 
 ### `ising-analysis/src/signals.rs`
 - Added `SignalSummary` struct and `summarize_signals()` function
+- Added `SystemicComplexity` signal type and `detect_systemic_complexity()` detection
+- Added `systemic_complexity_count` to `SignalSummary`
+- Added `is_go_intra_package_pair()` for Go unnecessary abstraction suppression (GAP-13)
+- Fixed `is_source_file()` to include all supported extensions (`.vue`, `.php`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`, `.kts`, `.csx`)
+- Expanded `is_generated_code()` with Django migrations, Rails schema, Alembic, vendor/third_party patterns
 
 ### `ising-analysis/src/stress.rs`
 - Changed `compute_risk_field()` to accept `Option<&SignalSummary>`
 - Rewrote `compute_health_index()`: median-based risk, sqrt-normalized signals, three sub-scores
+- Added `systemic_complexity_count * 2.5` to signal sub-score (flat weight, not sqrt-normalized)
 - Added caveat generation for data quality issues
 
 ### `ising-db/src/schema.rs`
@@ -165,9 +175,13 @@ Grade A does NOT mean: "This codebase is well-maintained" or "This codebase has 
 ### `ising-server/src/lib.rs`
 - Updated `compute_risk_field()` call with new signature
 
+### `ising-core/src/path_utils.rs`
+- Expanded `is_test_file()` with Java, Kotlin, C#, PHP, Ruby test conventions
+- Added directory patterns: `spec/`, `src/test/`, `__tests__/`
+
 ## Future work
 
-1. **New signal: systemic complexity** — detect when median/p75 complexity across the repo is high, even if no individual file crosses the god module threshold. This would catch Odoo's pattern.
+1. ~~**New signal: systemic complexity**~~ — **DONE.** `SystemicComplexity` signal detects elevated median/P75 complexity (≥15 median or ≥30 P75 across 50+ modules). Integrated into health index at 2.5x flat weight. Validate against Odoo to confirm grade impact.
 2. **Defect correlation study** — validate signal weights against actual defect rates across repos. Currently the weights are assumptions.
-3. **Go-specific signal calibration** — measure false positive rate of ghost coupling in Go repos and apply correction factor.
+3. ~~**Go-specific signal calibration**~~ — **Partially done.** Go intra-package pairs suppressed in unnecessary abstraction detection. Ghost coupling false positives in Go repos still need a correction factor.
 4. **API stability signal** — measure breaking changes, deprecation frequency, interface churn. Would catch LangChain's failure mode if it exists.
