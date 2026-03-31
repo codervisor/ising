@@ -59,6 +59,8 @@ fn extract_function(node: tree_sitter::Node<'_>, source: &str, functions: &mut V
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        calls: Vec::new(),
+        deprecated: false,
     });
 }
 
@@ -80,6 +82,7 @@ fn extract_type(node: tree_sitter::Node<'_>, source: &str, classes: &mut Vec<Cla
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        deprecated: false,
     });
 }
 

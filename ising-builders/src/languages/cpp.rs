@@ -138,6 +138,8 @@ fn extract_function(
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        calls: Vec::new(),
+        deprecated: false,
     });
 }
 
@@ -166,6 +168,7 @@ fn extract_class(
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        deprecated: false,
     });
 
     // Extract inline methods from class body
@@ -250,6 +253,7 @@ fn extract_enum(node: tree_sitter::Node<'_>, source: &str, classes: &mut Vec<Cla
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        deprecated: false,
     });
 }
 

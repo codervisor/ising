@@ -31,8 +31,13 @@ struct GraphMaxes {
     coupling: f64,
 }
 
-/// Collect normalization maxes from all Module-type nodes.
+/// Collect normalization maxes from nodes of a given type.
 fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
+    collect_maxes_for_type(graph, NodeType::Module)
+}
+
+/// Collect normalization maxes from all nodes of the specified type.
+fn collect_maxes_for_type(graph: &UnifiedGraph, node_type: NodeType) -> GraphMaxes {
     let mut max_complexity: f64 = 0.0;
     let mut max_cbo: f64 = 0.0;
     let mut max_loc: f64 = 0.0;
@@ -41,7 +46,7 @@ fn collect_maxes(graph: &UnifiedGraph) -> GraphMaxes {
 
     for node_id in graph.node_ids() {
         let node = match graph.get_node(node_id) {
-            Some(n) if n.node_type == NodeType::Module => n,
+            Some(n) if n.node_type == node_type => n,
             _ => continue,
         };
 
@@ -229,7 +234,10 @@ pub fn compute_risk_field(
     config: &Config,
     signal_summary: Option<&SignalSummary>,
 ) -> RiskField {
-    compute_risk_field_with_loads(graph, config, &HashMap::new(), signal_summary)
+    let mut field = compute_risk_field_with_loads(graph, config, &HashMap::new(), signal_summary);
+    // Add function-level risk entries (separate normalization and tier assignment)
+    compute_function_risks(graph, config, &mut field);
+    field
 }
 
 /// Compute risk field with optional per-node pressure multipliers.
@@ -342,6 +350,173 @@ fn compute_risk_field_with_loads(
         converged,
         health,
     }
+}
+
+/// Compute function-level risk and append to an existing (module-level) risk field.
+///
+/// Functions are assessed using the same framework as modules but with their own
+/// normalization context (maxes computed from Function nodes only) and using
+/// Calls edges for propagation instead of Imports/CoChanges.
+pub fn compute_function_risks(graph: &UnifiedGraph, config: &Config, field: &mut RiskField) {
+    let func_maxes = collect_maxes_for_type(graph, NodeType::Function);
+
+    // If there are no functions with any data, skip entirely
+    if func_maxes.change_pressure == 0.0 && func_maxes.complexity == 0.0 {
+        return;
+    }
+
+    // Collect function node IDs
+    let func_ids: Vec<String> = graph
+        .node_ids()
+        .filter(|id| {
+            graph
+                .get_node(id)
+                .is_some_and(|n| n.node_type == NodeType::Function)
+        })
+        .map(|s| s.to_string())
+        .collect();
+
+    if func_ids.is_empty() {
+        return;
+    }
+
+    // Compute per-function values
+    let mut capacities: HashMap<String, f64> = HashMap::new();
+    let mut local_loads: HashMap<String, f64> = HashMap::new();
+
+    for node_id in &func_ids {
+        let change_load = compute_change_load(graph, node_id, &func_maxes, 1.0);
+        let capacity = compute_capacity(graph, node_id, &func_maxes);
+
+        local_loads.insert(node_id.clone(), change_load);
+        capacities.insert(node_id.clone(), capacity);
+    }
+
+    // Propagate risk through Calls edges
+    let func_neighbors = build_calls_adjacency(graph, config);
+    let (propagated, _, _) = propagate_risk_with_adjacency(&local_loads, &func_neighbors, config);
+
+    // Build NodeRisk entries for functions
+    let mut func_nodes: Vec<NodeRisk> = Vec::with_capacity(func_ids.len());
+    for node_id in &func_ids {
+        let change_load = local_loads.get(node_id).copied().unwrap_or(0.0);
+        let capacity = capacities.get(node_id).copied().unwrap_or(1.0);
+        let raw_total = propagated.get(node_id.as_str()).copied().unwrap_or(change_load);
+        let propagated_risk = (raw_total - change_load).max(0.0);
+        let total_risk = change_load + propagated_risk;
+
+        let safety_factor = (capacity / total_risk.max(DIV_EPSILON)).min(MAX_SAFETY_FACTOR);
+        let zone = SafetyZone::from_factor(safety_factor);
+        let direct_score = change_load / capacity.max(DIV_EPSILON);
+
+        let file_path = graph
+            .get_node(node_id)
+            .map(|n| n.file_path.clone())
+            .unwrap_or_default();
+
+        let structural_weight = compute_structural_weight(graph, node_id, &func_maxes);
+
+        func_nodes.push(NodeRisk {
+            node_id: node_id.clone(),
+            file_path,
+            change_load,
+            structural_weight,
+            propagated_risk,
+            risk_score: total_risk,
+            capacity,
+            safety_factor,
+            zone,
+            direct_score,
+            risk_tier: RiskTier::Normal,
+            percentile: 0.0,
+        });
+    }
+
+    // Assign risk tiers among functions only (separate from module tiers)
+    assign_risk_tiers(&mut func_nodes);
+
+    field.nodes.extend(func_nodes);
+}
+
+/// Build adjacency list from Calls edges (for function-level propagation).
+fn build_calls_adjacency<'a>(
+    graph: &'a UnifiedGraph,
+    config: &Config,
+) -> HashMap<&'a str, Vec<(&'a str, f64)>> {
+    let mut neighbors: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+
+    let calls_edges = graph.edges_of_type(&EdgeType::Calls);
+    for &(src, tgt, weight) in &calls_edges {
+        // Caller -> callee: structural damping (similar to imports)
+        let w = weight * config.fea.structural_damping;
+        neighbors.entry(src).or_default().push((tgt, w));
+        // Reverse: callee risk propagates back to caller (at lower weight)
+        neighbors.entry(tgt).or_default().push((src, w * 0.5));
+    }
+
+    neighbors
+}
+
+/// Run risk propagation with a pre-built adjacency list.
+fn propagate_risk_with_adjacency<'a>(
+    local_loads: &HashMap<String, f64>,
+    raw_neighbors: &HashMap<&'a str, Vec<(&'a str, f64)>>,
+    config: &Config,
+) -> (HashMap<String, f64>, usize, bool) {
+    let epsilon = config.fea.epsilon;
+    let max_iter = config.fea.max_iterations;
+
+    // Normalize weights per node
+    const MAX_SPECTRAL_RADIUS: f64 = 0.95;
+    let neighbors: HashMap<&str, Vec<(&str, f64)>> = raw_neighbors
+        .iter()
+        .map(|(&node, nbrs)| {
+            let total_weight: f64 = nbrs.iter().map(|&(_, w)| w).sum();
+            if total_weight > MAX_SPECTRAL_RADIUS {
+                let scale = MAX_SPECTRAL_RADIUS / total_weight;
+                let normalized: Vec<(&str, f64)> =
+                    nbrs.iter().map(|&(n, w)| (n, w * scale)).collect();
+                (node, normalized)
+            } else {
+                (node, nbrs.clone())
+            }
+        })
+        .collect();
+
+    let mut propagated: HashMap<String, f64> = local_loads.clone();
+    let mut converged = false;
+    let mut iterations = 0;
+
+    for iter in 0..max_iter {
+        iterations = iter + 1;
+        let mut max_delta: f64 = 0.0;
+        let mut next = HashMap::new();
+
+        for (node_id, &local_load) in local_loads {
+            let neighbor_contribution: f64 = neighbors
+                .get(node_id.as_str())
+                .map(|nbrs| {
+                    nbrs.iter()
+                        .map(|&(nbr, weight)| propagated.get(nbr).copied().unwrap_or(0.0) * weight)
+                        .sum()
+                })
+                .unwrap_or(0.0);
+
+            let new_val = local_load + neighbor_contribution;
+            let old_val = propagated.get(node_id).copied().unwrap_or(0.0);
+            max_delta = max_delta.max((new_val - old_val).abs());
+            next.insert(node_id.clone(), new_val);
+        }
+
+        propagated = next;
+
+        if max_delta < epsilon {
+            converged = true;
+            break;
+        }
+    }
+
+    (propagated, iterations, converged)
 }
 
 /// Simulate a load case: apply pressure multipliers and compute resulting risk.
@@ -895,5 +1070,111 @@ mod tests {
                 .iter()
                 .any(|lp| lp.node_id == "b.py" && lp.pressure == 1.5)
         );
+    }
+
+    #[test]
+    fn test_function_level_risk_computation() {
+        let mut g = UnifiedGraph::new();
+
+        // Module with functions
+        let mut m = Node::module("app.py", "app.py");
+        m.complexity = Some(50);
+        m.loc = Some(200);
+        g.add_node(m);
+
+        let mut f1 = Node::function("app.py::hot_func", "app.py", 1, 50);
+        f1.complexity = Some(20);
+        f1.loc = Some(50);
+        g.add_node(f1);
+
+        let mut f2 = Node::function("app.py::cool_func", "app.py", 60, 80);
+        f2.complexity = Some(5);
+        f2.loc = Some(20);
+        g.add_node(f2);
+
+        g.add_edge("app.py", "app.py::hot_func", EdgeType::Contains, 1.0)
+            .unwrap();
+        g.add_edge("app.py", "app.py::cool_func", EdgeType::Contains, 1.0)
+            .unwrap();
+        g.add_edge("app.py::hot_func", "app.py::cool_func", EdgeType::Calls, 1.0)
+            .unwrap();
+
+        // Function-level change metrics
+        g.change_metrics.insert(
+            "app.py::hot_func".to_string(),
+            ChangeMetrics {
+                change_freq: 20,
+                churn_lines: 200,
+                churn_rate: 10.0,
+                hotspot_score: 0.8,
+                ..Default::default()
+            },
+        );
+        g.change_metrics.insert(
+            "app.py::cool_func".to_string(),
+            ChangeMetrics {
+                change_freq: 2,
+                churn_lines: 10,
+                churn_rate: 5.0,
+                hotspot_score: 0.1,
+                ..Default::default()
+            },
+        );
+
+        // Module-level metrics for the module part of the risk field
+        g.change_metrics.insert(
+            "app.py".to_string(),
+            ChangeMetrics {
+                change_freq: 22,
+                churn_lines: 210,
+                churn_rate: 9.5,
+                hotspot_score: 0.7,
+                ..Default::default()
+            },
+        );
+
+        let config = Config::default();
+        let field = compute_risk_field(&g, &config, None);
+
+        // Should have 1 module + 2 function nodes
+        assert_eq!(field.nodes.len(), 3, "Should have 1 module + 2 functions");
+
+        // Find function nodes
+        let hot = field
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "app.py::hot_func")
+            .expect("hot_func should be in risk field");
+        let cool = field
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "app.py::cool_func")
+            .expect("cool_func should be in risk field");
+
+        // hot_func should have higher risk than cool_func
+        assert!(
+            hot.direct_score > cool.direct_score,
+            "hot_func ({}) should have higher direct_score than cool_func ({})",
+            hot.direct_score,
+            cool.direct_score,
+        );
+
+        // Both should have capacity > 0
+        assert!(hot.capacity > 0.0);
+        assert!(cool.capacity > 0.0);
+    }
+
+    #[test]
+    fn test_function_risks_not_added_without_functions() {
+        let g = make_test_graph();
+        let config = Config::default();
+        let field = compute_risk_field(&g, &config, None);
+
+        // make_test_graph only has modules, no functions
+        assert_eq!(field.nodes.len(), 3, "Should only have 3 module nodes");
+        // All nodes should be module-level (no "::" in ID)
+        for n in &field.nodes {
+            assert!(!n.node_id.contains("::"), "No function nodes expected");
+        }
     }
 }

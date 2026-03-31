@@ -269,6 +269,13 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     let risk_field = stress::compute_risk_field(&graph, &config, Some(&signal_summary));
     db.store_risk_field(&risk_field)?;
 
+    // Count modules vs functions in risk field
+    let module_risk_count = risk_field
+        .nodes
+        .iter()
+        .filter(|n| !n.node_id.contains("::"))
+        .count();
+    let func_risk_count = risk_field.nodes.len() - module_risk_count;
     let critical_count = risk_field
         .nodes
         .iter()
@@ -305,8 +312,9 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
         .map(|h| format!(" health={}", h.grade))
         .unwrap_or_default();
     eprintln!(
-        "  Risk analysis:    {} modules ({} critical, {} high, converged={} in {} iter){}",
-        risk_field.nodes.len(),
+        "  Risk analysis:    {} modules + {} functions ({} critical, {} high, converged={} in {} iter){}",
+        module_risk_count,
+        func_risk_count,
         critical_count,
         high_count,
         risk_field.converged,

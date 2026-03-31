@@ -1,6 +1,6 @@
 //! C# AST extraction via Tree-sitter.
 
-use super::{ClassInfo, FunctionInfo, ImportInfo};
+use super::{CallInfo, ClassInfo, FunctionInfo, ImportInfo};
 
 /// Extract C# functions, classes, and imports from a tree-sitter parse tree.
 pub fn extract_nodes(
@@ -37,11 +37,13 @@ fn walk_node(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_obsolete_attribute(child, source);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated,
                     });
                 }
                 // Recurse into type body for methods
@@ -58,11 +60,15 @@ fn walk_node(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_obsolete_attribute(child, source);
+                    let calls = extract_calls(child, source);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls,
+                        deprecated,
                     });
                 }
             }
@@ -75,11 +81,15 @@ fn walk_node(
                         .to_string();
                     let complexity = compute_complexity(child);
                     if complexity > 1 {
+                        let deprecated = has_obsolete_attribute(child, source);
+                        let calls = extract_calls(child, source);
                         functions.push(FunctionInfo {
                             name,
                             line_start: child.start_position().row as u32 + 1,
                             line_end: child.end_position().row as u32 + 1,
                             complexity,
+                            calls,
+                            deprecated,
                         });
                     }
                 }
@@ -133,6 +143,52 @@ fn extract_using(node: tree_sitter::Node<'_>, source: &str, imports: &mut Vec<Im
     // Convert dotted namespace to path: System.Collections -> System/Collections.cs
     let path = namespace.replace('.', "/") + ".cs";
     imports.push(ImportInfo { source: path });
+}
+
+/// Check if a C# item has an `[Obsolete]` attribute.
+fn has_obsolete_attribute(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut sibling = node.prev_sibling();
+    while let Some(s) = sibling {
+        if s.kind() == "attribute_list" {
+            let text = s.utf8_text(source.as_bytes()).unwrap_or("");
+            if text.contains("Obsolete") || text.contains("Deprecated") {
+                return true;
+            }
+        } else if s.kind() != "comment" {
+            break;
+        }
+        sibling = s.prev_sibling();
+    }
+    false
+}
+
+/// Extract function calls from within a method body.
+fn extract_calls(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
+    let mut calls = Vec::new();
+    fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
+        if node.kind() == "invocation_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee = func_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
+                if !callee.is_empty() {
+                    calls.push(CallInfo {
+                        callee,
+                        line: node.start_position().row as u32 + 1,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_calls(child, source, calls);
+        }
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        walk_calls(body, source, &mut calls);
+    }
+    calls
 }
 
 /// Compute cyclomatic complexity for C# code.

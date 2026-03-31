@@ -78,6 +78,9 @@ pub struct Node {
     pub complexity: Option<u32>,
     /// Maximum nesting depth.
     pub nesting_depth: Option<u32>,
+    /// Whether this entity is marked as deprecated.
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 impl Node {
@@ -93,6 +96,7 @@ impl Node {
             loc: None,
             complexity: None,
             nesting_depth: None,
+            deprecated: false,
         }
     }
 
@@ -113,6 +117,7 @@ impl Node {
             loc: None,
             complexity: None,
             nesting_depth: None,
+            deprecated: false,
         }
     }
 
@@ -133,6 +138,7 @@ impl Node {
             loc: None,
             complexity: None,
             nesting_depth: None,
+            deprecated: false,
         }
     }
 }

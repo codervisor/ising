@@ -16,7 +16,8 @@ impl Database {
                 language TEXT,
                 loc INTEGER,
                 complexity INTEGER,
-                nesting_depth INTEGER
+                nesting_depth INTEGER,
+                deprecated BOOLEAN DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS edges (

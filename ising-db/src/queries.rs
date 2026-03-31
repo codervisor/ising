@@ -13,8 +13,8 @@ impl Database {
         // Insert nodes
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO nodes (id, type, file_path, line_start, line_end, language, loc, complexity, nesting_depth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR REPLACE INTO nodes (id, type, file_path, line_start, line_end, language, loc, complexity, nesting_depth, deprecated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             for idx in graph.graph.node_indices() {
                 let node = &graph.graph[idx];
@@ -34,6 +34,7 @@ impl Database {
                     node.loc,
                     node.complexity,
                     node.nesting_depth,
+                    node.deprecated,
                 ])?;
             }
         }
@@ -505,7 +506,7 @@ impl Database {
         // Load nodes
         {
             let mut stmt = self.conn.prepare(
-                "SELECT id, type, file_path, line_start, line_end, language, loc, complexity, nesting_depth
+                "SELECT id, type, file_path, line_start, line_end, language, loc, complexity, nesting_depth, deprecated
                  FROM nodes",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -518,6 +519,7 @@ impl Database {
                     "function" => NodeType::Function,
                     _ => NodeType::Import,
                 };
+                let deprecated: bool = row.get::<_, Option<bool>>(9)?.unwrap_or(false);
                 Ok(Node {
                     id,
                     node_type,
@@ -528,6 +530,7 @@ impl Database {
                     loc: row.get(6)?,
                     complexity: row.get(7)?,
                     nesting_depth: row.get(8)?,
+                    deprecated,
                 })
             })?;
             for node in rows {

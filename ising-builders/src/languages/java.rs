@@ -1,6 +1,6 @@
 //! Java AST extraction via Tree-sitter.
 
-use super::{ClassInfo, FunctionInfo, ImportInfo};
+use super::{CallInfo, ClassInfo, FunctionInfo, ImportInfo};
 
 /// Extract Java functions, classes, and imports from a tree-sitter parse tree.
 pub fn extract_nodes(
@@ -24,11 +24,13 @@ pub fn extract_nodes(
                         .unwrap_or("")
                         .to_string();
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_annotation(child, source);
                     classes.push(ClassInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        deprecated,
                     });
                 }
                 // Recurse into class body for methods
@@ -59,11 +61,15 @@ fn extract_class_members(
                     .unwrap_or("")
                     .to_string();
                 let complexity = compute_complexity(child);
+                let deprecated = has_deprecated_annotation(child, source);
+                let calls = extract_calls(child, source);
                 functions.push(FunctionInfo {
                     name,
                     line_start: child.start_position().row as u32 + 1,
                     line_end: child.end_position().row as u32 + 1,
                     complexity,
+                    calls,
+                    deprecated,
                 });
             }
         }
@@ -102,6 +108,72 @@ fn extract_import(
     // Convert dotted path to file path: com.example.Foo -> com/example/Foo.java
     let path = stripped.replace('.', "/") + ".java";
     imports.push(ImportInfo { source: path });
+}
+
+/// Check if a Java item has a `@Deprecated` annotation.
+fn has_deprecated_annotation(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut sibling = node.prev_sibling();
+    while let Some(s) = sibling {
+        if s.kind() == "marker_annotation" || s.kind() == "annotation" {
+            let text = s.utf8_text(source.as_bytes()).unwrap_or("");
+            if text.contains("Deprecated") {
+                return true;
+            }
+        } else if s.kind() == "modifiers" {
+            // Annotations may be inside a modifiers node
+            let mut c = s.walk();
+            for child in s.children(&mut c) {
+                if (child.kind() == "marker_annotation" || child.kind() == "annotation")
+                    && child
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .contains("Deprecated")
+                {
+                    return true;
+                }
+            }
+        } else if s.kind() != "line_comment" && s.kind() != "block_comment" {
+            break;
+        }
+        sibling = s.prev_sibling();
+    }
+    false
+}
+
+/// Extract function calls from within a method body.
+fn extract_calls(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
+    let mut calls = Vec::new();
+    fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
+        if node.kind() == "method_invocation" {
+            let callee = if let Some(obj) = node.child_by_field_name("object") {
+                let obj_text = obj.utf8_text(source.as_bytes()).unwrap_or("");
+                let name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .unwrap_or("");
+                format!("{}.{}", obj_text, name)
+            } else {
+                node.child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            if !callee.is_empty() {
+                calls.push(CallInfo {
+                    callee,
+                    line: node.start_position().row as u32 + 1,
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_calls(child, source, calls);
+        }
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        walk_calls(body, source, &mut calls);
+    }
+    calls
 }
 
 /// Compute cyclomatic complexity for Java code.

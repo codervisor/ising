@@ -71,6 +71,7 @@ fn extract_class(
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        deprecated: false,
     });
 
     // Recurse into class body for methods
@@ -128,6 +129,8 @@ fn extract_function(
         line_start: node.start_position().row as u32 + 1,
         line_end: node.end_position().row as u32 + 1,
         complexity,
+        calls: Vec::new(),
+        deprecated: false,
     });
 }
 

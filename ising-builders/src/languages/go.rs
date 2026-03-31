@@ -1,6 +1,6 @@
 //! Go AST extraction via Tree-sitter.
 
-use super::{ClassInfo, FunctionInfo, ImportInfo};
+use super::{CallInfo, ClassInfo, FunctionInfo, ImportInfo};
 use std::path::Path;
 
 /// Extract Go functions, methods, structs, interfaces, and imports
@@ -34,11 +34,15 @@ pub fn extract_nodes(
                         }
                     }
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_comment(child, source);
+                    let calls = extract_calls(child, source);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls,
+                        deprecated,
                     });
                 }
             }
@@ -55,11 +59,15 @@ pub fn extract_nodes(
                         method_name
                     };
                     let complexity = compute_complexity(child);
+                    let deprecated = has_deprecated_comment(child, source);
+                    let calls = extract_calls(child, source);
                     functions.push(FunctionInfo {
                         name,
                         line_start: child.start_position().row as u32 + 1,
                         line_end: child.end_position().row as u32 + 1,
                         complexity,
+                        calls,
+                        deprecated,
                     });
                 }
             }
@@ -129,6 +137,7 @@ fn extract_type_declaration(
                     line_start: child.start_position().row as u32 + 1,
                     line_end: child.end_position().row as u32 + 1,
                     complexity,
+                    deprecated: false,
                 });
             }
         }
@@ -224,6 +233,53 @@ fn read_go_mod_module(repo_path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Check if a Go function has a "// Deprecated:" comment (godoc convention).
+fn has_deprecated_comment(node: tree_sitter::Node<'_>, source: &str) -> bool {
+    let mut sibling = node.prev_sibling();
+    while let Some(s) = sibling {
+        if s.kind() == "comment" {
+            let text = s.utf8_text(source.as_bytes()).unwrap_or("");
+            // Go convention: "// Deprecated: use Foo instead"
+            if text.contains("Deprecated:") {
+                return true;
+            }
+        } else {
+            break;
+        }
+        sibling = s.prev_sibling();
+    }
+    false
+}
+
+/// Extract function calls from within a function body.
+fn extract_calls(node: tree_sitter::Node<'_>, source: &str) -> Vec<CallInfo> {
+    let mut calls = Vec::new();
+    fn walk_calls(node: tree_sitter::Node<'_>, source: &str, calls: &mut Vec<CallInfo>) {
+        if node.kind() == "call_expression" {
+            if let Some(func_node) = node.child_by_field_name("function") {
+                let callee = func_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
+                if !callee.is_empty() {
+                    calls.push(CallInfo {
+                        callee,
+                        line: node.start_position().row as u32 + 1,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_calls(child, source, calls);
+        }
+    }
+    if let Some(body) = node.child_by_field_name("body") {
+        walk_calls(body, source, &mut calls);
+    }
+    calls
 }
 
 /// Compute cyclomatic complexity for Go code.
