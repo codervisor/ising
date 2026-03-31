@@ -930,6 +930,12 @@ fn detect_orphan_functions(graph: &UnifiedGraph) -> Vec<Signal> {
             continue;
         }
 
+        // Skip trait impl methods and common framework patterns that are called
+        // implicitly by the language runtime, framework, or via dispatch
+        if is_trait_or_framework_method(func_name) {
+            continue;
+        }
+
         // Skip test functions
         if func_name.starts_with("test_") || func_name.starts_with("Test") {
             continue;
@@ -937,6 +943,25 @@ fn detect_orphan_functions(graph: &UnifiedGraph) -> Vec<Signal> {
 
         // Skip if the function is in a test file
         if is_test_file(&node.file_path) {
+            continue;
+        }
+
+        // Skip functions in crate entry points (lib.rs, main.rs, mod.rs) — these
+        // are public API that gets called from other crates or the binary
+        if is_entry_point_file(&node.file_path) {
+            continue;
+        }
+
+        // Skip React/Vue components: PascalCase functions in .tsx/.jsx/.vue files
+        // are called implicitly by the framework's component rendering
+        if is_component_function(func_name, &node.file_path) {
+            continue;
+        }
+
+        // Skip methods on structs/classes — "Type::method" pattern indicates it's
+        // likely called via method dispatch (obj.method()) which our call extraction
+        // may not resolve across files
+        if is_qualified_method(node_id) {
             continue;
         }
 
@@ -952,6 +977,79 @@ fn detect_orphan_functions(graph: &UnifiedGraph) -> Vec<Signal> {
         ));
     }
     signals
+}
+
+/// Check if a function name matches common trait impl or framework callback patterns
+/// that are called implicitly (not via direct function call).
+fn is_trait_or_framework_method(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    // Rust trait impls
+    if matches!(
+        lower.as_str(),
+        "fmt"
+            | "default"
+            | "clone"
+            | "drop"
+            | "deref"
+            | "deref_mut"
+            | "from"
+            | "into"
+            | "try_from"
+            | "try_into"
+            | "as_ref"
+            | "as_mut"
+            | "serialize"
+            | "deserialize"
+            | "eq"
+            | "partial_cmp"
+            | "cmp"
+            | "hash"
+            | "display"
+            | "debug"
+            | "index"
+            | "next"
+            | "poll"
+            | "call"
+    ) {
+        return true;
+    }
+    // Common "from_*" / "into_*" conversion constructors
+    if lower.starts_with("from_") || lower.starts_with("into_") || lower.starts_with("try_from_") {
+        return true;
+    }
+    // Python dunder methods (called by runtime)
+    if name.starts_with("__") && name.ends_with("__") {
+        return true;
+    }
+    // Java/C#/Kotlin overrides
+    if matches!(
+        lower.as_str(),
+        "tostring" | "hashcode" | "equals" | "compareto" | "dispose" | "finalize" | "gettype"
+    ) {
+        return true;
+    }
+    false
+}
+
+/// Check if a function looks like a React/Vue component (PascalCase in .tsx/.jsx/.vue).
+fn is_component_function(name: &str, file_path: &str) -> bool {
+    let is_component_file = file_path.ends_with(".tsx")
+        || file_path.ends_with(".jsx")
+        || file_path.ends_with(".vue");
+    if !is_component_file {
+        return false;
+    }
+    // PascalCase: starts with uppercase, has at least one lowercase
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name.contains(|c: char| c.is_ascii_lowercase())
+}
+
+/// Check if a node_id represents a qualified method (e.g. "file.rs::Struct::method").
+/// Methods are often called via dispatch (obj.method()) which static call extraction
+/// can miss across file boundaries.
+fn is_qualified_method(node_id: &str) -> bool {
+    // Count "::" segments — "file::Type::method" has 3 parts, "file::func" has 2
+    node_id.split("::").count() >= 3
 }
 
 /// Check if a function name is a common entry point.
@@ -986,6 +1084,7 @@ fn is_entry_point_file(path: &str) -> bool {
             | "main.go"
             | "main.ts"
             | "main.js"
+            | "main.tsx"
             | "index.ts"
             | "index.js"
             | "index.tsx"
@@ -995,6 +1094,8 @@ fn is_entry_point_file(path: &str) -> bool {
             | "app.py"
             | "app.ts"
             | "app.js"
+            | "app.tsx"
+            | "app.jsx"
             | "__init__.py"
             | "setup.py"
             | "conftest.py"
@@ -1002,6 +1103,43 @@ fn is_entry_point_file(path: &str) -> bool {
             | "program.cs"
             | "startup.cs"
     )
+}
+
+/// Check if a file is a config/build file that's consumed by tooling, not imported.
+fn is_config_or_standalone_file(path: &str) -> bool {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let lower = filename.to_lowercase();
+
+    // Config files consumed by bundlers/tools — never imported by application code
+    if lower.ends_with(".config.js")
+        || lower.ends_with(".config.ts")
+        || lower.ends_with(".config.mjs")
+        || lower.ends_with(".config.cjs")
+    {
+        return true;
+    }
+
+    // Type declaration files — consumed by the compiler, not imported
+    if lower.ends_with(".d.ts") {
+        return true;
+    }
+
+    // Environment declaration files (vite-env.d.ts, env.d.ts, etc.)
+    if lower.contains("-env.") && lower.ends_with(".ts") {
+        return true;
+    }
+
+    // Standalone scripts in a scripts/ directory — run directly, not imported
+    if path.starts_with("scripts/") || path.contains("/scripts/") {
+        return true;
+    }
+
+    // Package entry points (bin/ directory files)
+    if path.starts_with("bin/") || path.contains("/bin/") {
+        return true;
+    }
+
+    false
 }
 
 /// Detect modules with zero incoming Imports edges (potential dead code).
@@ -1033,6 +1171,11 @@ fn detect_orphan_modules(
 
         // Skip entry point files
         if is_entry_point_file(node_id) {
+            continue;
+        }
+
+        // Skip config files, scripts, and standalone tooling files
+        if is_config_or_standalone_file(node_id) {
             continue;
         }
 
@@ -1857,10 +2000,10 @@ mod tests {
     #[test]
     fn test_orphan_function_detected() {
         let mut g = UnifiedGraph::new();
-        g.add_node(Node::module("app.py", "app.py"));
-        let f = Node::function("app.py::unused_helper", "app.py", 10, 20);
+        g.add_node(Node::module("utils.py", "utils.py"));
+        let f = Node::function("utils.py::unused_helper", "utils.py", 10, 20);
         g.add_node(f);
-        g.add_edge("app.py", "app.py::unused_helper", EdgeType::Contains, 1.0)
+        g.add_edge("utils.py", "utils.py::unused_helper", EdgeType::Contains, 1.0)
             .unwrap();
         // No Calls edges pointing to this function
 
@@ -2088,8 +2231,123 @@ mod tests {
         assert!(is_entry_point_file("src/index.ts"));
         assert!(is_entry_point_file("lib.rs"));
         assert!(is_entry_point_file("__init__.py"));
+        assert!(is_entry_point_file("src/main.tsx"));
         assert!(!is_entry_point_file("utils.py"));
         assert!(!is_entry_point_file("src/handler.rs"));
+    }
+
+    #[test]
+    fn test_trait_method_not_flagged_as_orphan() {
+        assert!(is_trait_or_framework_method("fmt"));
+        assert!(is_trait_or_framework_method("default"));
+        assert!(is_trait_or_framework_method("clone"));
+        assert!(is_trait_or_framework_method("from_factor"));
+        assert!(is_trait_or_framework_method("__str__"));
+        assert!(is_trait_or_framework_method("toString"));
+        assert!(!is_trait_or_framework_method("process_data"));
+        assert!(!is_trait_or_framework_method("calculate_risk"));
+    }
+
+    #[test]
+    fn test_component_function_not_flagged_as_orphan() {
+        assert!(is_component_function("BlastRadius", "src/views/BlastRadius.tsx"));
+        assert!(is_component_function("App", "src/App.jsx"));
+        assert!(!is_component_function("BlastRadius", "src/views/blast.rs"));
+        assert!(!is_component_function("helper", "src/views/Foo.tsx"));
+    }
+
+    #[test]
+    fn test_qualified_method_not_flagged_as_orphan() {
+        assert!(is_qualified_method("file.rs::Database::open"));
+        assert!(is_qualified_method("lib.rs::ScipLoader::load_from_index"));
+        assert!(!is_qualified_method("file.rs::standalone_func"));
+        assert!(!is_qualified_method("extract_nodes"));
+    }
+
+    #[test]
+    fn test_config_or_standalone_file() {
+        assert!(is_config_or_standalone_file("vite.config.ts"));
+        assert!(is_config_or_standalone_file("postcss.config.js"));
+        assert!(is_config_or_standalone_file("scripts/publish.ts"));
+        assert!(is_config_or_standalone_file("src/vite-env.d.ts"));
+        assert!(is_config_or_standalone_file("packages/cli/bin/ising.js"));
+        assert!(!is_config_or_standalone_file("src/main.ts"));
+        assert!(!is_config_or_standalone_file("src/utils.rs"));
+    }
+
+    #[test]
+    fn test_orphan_function_skips_trait_impls() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("app.rs", "app.rs"));
+        let f = Node::function("app.rs::fmt", "app.rs", 10, 20);
+        g.add_node(f);
+        // No callers, but "fmt" is a trait impl
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals
+                .iter()
+                .any(|s| s.signal_type == SignalType::OrphanFunction && s.node_a == "app.rs::fmt"),
+            "Trait impl methods should not be flagged as orphan"
+        );
+    }
+
+    #[test]
+    fn test_orphan_function_skips_qualified_methods() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("db.rs", "db.rs"));
+        let f = Node::function("db.rs::Database::open", "db.rs", 10, 30);
+        g.add_node(f);
+        // No callers, but it's a struct method likely called via dispatch
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals.iter().any(|s| s.signal_type == SignalType::OrphanFunction
+                && s.node_a == "db.rs::Database::open"),
+            "Qualified struct methods should not be flagged as orphan"
+        );
+    }
+
+    #[test]
+    fn test_orphan_module_skips_config_files() {
+        use ising_core::graph::ChangeMetrics;
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("vite.config.ts", "vite.config.ts"));
+        g.change_metrics.insert(
+            "vite.config.ts".to_string(),
+            ChangeMetrics {
+                change_freq: 3,
+                ..Default::default()
+            },
+        );
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals.iter().any(|s| s.signal_type == SignalType::OrphanModule
+                && s.node_a == "vite.config.ts"),
+            "Config files should not be flagged as orphan modules"
+        );
+    }
+
+    #[test]
+    fn test_orphan_module_skips_scripts() {
+        use ising_core::graph::ChangeMetrics;
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("scripts/deploy.ts", "scripts/deploy.ts"));
+        g.change_metrics.insert(
+            "scripts/deploy.ts".to_string(),
+            ChangeMetrics {
+                change_freq: 5,
+                ..Default::default()
+            },
+        );
+
+        let signals = detect_signals(&g, &default_config());
+        assert!(
+            !signals.iter().any(|s| s.signal_type == SignalType::OrphanModule
+                && s.node_a == "scripts/deploy.ts"),
+            "Script files should not be flagged as orphan modules"
+        );
     }
 
     #[test]
