@@ -78,7 +78,7 @@ Grade thresholds: A ≥ 0.85, B ≥ 0.70, C ≥ 0.55, D ≥ 0.40, F < 0.40.
 ### Validate empirically, don't rationalize
 
 - **Never cite research to justify a number you already picked.** That's rationalization. Instead: pick a number, run it against real repos, check for absurdities, adjust, document what broke.
-- **Run every formula change against the benchmark test set** using `./scripts/bench-oss-repos.sh` (28 repos across Python, JS/TS, Go, Java, Rust, C/C++). Clone repos first with `--clone` flag. Check the output table. If gin gets below B or odoo gets A with no caveats, something is wrong. See `specs/042-oss-validation-round5-expanded/README.md` for the full validation report and calibration targets.
+- **Run every formula change against the benchmark test set** using `./scripts/bench-oss-repos.sh` (see the script for the current repo list and language coverage). Clone repos first with `--clone` flag. Check the output table. If gin gets below B or odoo gets A with no caveats, something is wrong. See `specs/042-oss-validation-round5-expanded/README.md` for the full validation report and calibration targets.
 - **Look for the cases that break your theory**, not the ones that confirm it. Selection bias means you'll always find supporting examples.
 
 ### Statistical pitfalls to avoid

@@ -11,11 +11,13 @@
 #   sizes, and architectural patterns.
 #
 # USAGE:
-#   ./scripts/bench-oss-repos.sh [--clone] [--output DIR]
+#   ./scripts/bench-oss-repos.sh [--clone] [--output DIR] [--repos-dir DIR] [--since "TIME"]
 #
 # OPTIONS:
-#   --clone     Clone/update repos before analysis (default: skip if present)
-#   --output    Output directory for results (default: /tmp/oss-bench-results)
+#   --clone       Clone repos before analysis (default: skip if present)
+#   --output      Output directory for results (default: /tmp/oss-bench-results)
+#   --repos-dir   Directory where OSS repos are stored (default: /tmp/oss-repos)
+#   --since       Git history window for analysis (default: "6 months ago")
 #
 # PREREQUISITES:
 #   - cargo build --release (ising binary must be built)
@@ -104,6 +106,7 @@ REPO_DEFS=(
   "spring-boot|https://github.com/spring-projects/spring-boot.git|Java|challenger|Java framework (may fail: Ruby parser stack overflow on embedded files)"
 
   # Rust
+  "rust|https://github.com/rust-lang/rust.git|Rust|challenger|Rust compiler (may fail: stack overflow on 58K+ files)"
   "deno|https://github.com/denoland/deno.git|Rust|challenger|Rust runtime"
 
   # AI/ML repos
@@ -117,15 +120,20 @@ REPO_DEFS=(
   # Large Python
   "ha-core|https://github.com/home-assistant/core.git|Python|previously-tested|Massive Python IoT platform"
   "odoo|https://github.com/odoo/odoo.git|Python|previously-tested|Massive ERP (calibration target: A flags blind spot)"
+
+  # Ruby / PHP / C (known parser issues — included for regression tracking)
+  "rails|https://github.com/rails/rails.git|Ruby|challenger|Large Ruby framework (may fail: Ruby parser stack overflow)"
+  "php-src|https://github.com/php/php-src.git|C|challenger|PHP interpreter (may fail: PHP parser produces 0 nodes)"
 )
 
 # =============================================================================
 # Clone repos if requested
 # =============================================================================
 if [ "$CLONE" = true ]; then
-  echo "=== Cloning/updating repositories ==="
+  echo "=== Cloning repositories ==="
   mkdir -p "$REPOS_DIR"
 
+  PIDS=()
   for def in "${REPO_DEFS[@]}"; do
     IFS='|' read -r name url lang category notes <<< "$def"
     REPO_PATH="$REPOS_DIR/$name"
@@ -134,14 +142,20 @@ if [ "$CLONE" = true ]; then
       echo "  SKIP (exists): $name"
     else
       echo "  CLONE: $name"
-      if [ "$name" = "ha-core" ]; then
-        git clone --depth=500 "$url" "$REPO_PATH" 2>/dev/null &
-      else
-        git clone --depth=500 "$url" 2>/dev/null &
-      fi
+      git clone --depth=500 "$url" "$REPO_PATH" 2>/dev/null &
+      PIDS+=($!)
     fi
   done
-  wait
+
+  CLONE_FAIL=0
+  for pid in "${PIDS[@]}"; do
+    if ! wait "$pid"; then
+      CLONE_FAIL=$((CLONE_FAIL + 1))
+    fi
+  done
+  if [ "$CLONE_FAIL" -gt 0 ]; then
+    echo "  WARNING: $CLONE_FAIL clone(s) failed"
+  fi
   echo "  Done cloning."
   echo ""
 fi
