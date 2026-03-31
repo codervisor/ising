@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: complete
 created: 2026-03-31
 priority: high
 tags:
@@ -14,7 +14,9 @@ depends_on:
 
 # Micro-Level Analysis: Function-Level Risk, Orphans, Deprecation & Staleness
 
-> **Status**: in-progress · **Priority**: high · **Created**: 2026-03-31
+> **Status**: complete · **Priority**: high · **Created**: 2026-03-31
+>
+> **Follow-up**: [041-micro-analysis-gaps](../041-micro-analysis-gaps/README.md) — addresses remaining false positives, cross-crate resolution, and code duplication.
 
 ## Problem
 
