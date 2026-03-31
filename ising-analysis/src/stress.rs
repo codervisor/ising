@@ -716,9 +716,17 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     let unstable_dep_density = signals.unstable_dep_count as f64 / total_f;
 
     // === Sub-score 1: Risk (40%) ===
-    // Use median direct score (robust to outliers) with 5x amplification.
-    // The amplification spreads the distribution: median=0.01 → 0.95, median=0.1 → 0.67.
-    let base_health = 1.0 / (1.0 + median_direct_score * 5.0);
+    // Use median direct score (robust to outliers) with amplification.
+    // For very small samples (active_modules < 20), reduce the amplification factor
+    // to prevent a single hot file from dominating (e.g., flask: 16 active modules,
+    // one high-risk file pulls risk_sub_score from ~0.7 to 0.32).
+    let amplification = if active_modules < 20 {
+        // Scale from 2.0 at 1 module to 5.0 at 20 modules
+        2.0 + 3.0 * (active_modules as f64 / 20.0)
+    } else {
+        5.0
+    };
+    let base_health = 1.0 / (1.0 + median_direct_score * amplification);
     let concentration_factor = 0.8 + 0.2 * risk_concentration;
     let risk_sub_score = (base_health * concentration_factor).clamp(0.0, 1.0);
 
@@ -785,6 +793,12 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         caveats.push(
             "No ticking bombs detected; this may indicate missing defect/bug-fix data".to_string(),
         );
+    }
+    if critical_count > 100 {
+        caveats.push(format!(
+            "{} modules classified as critical risk; percentile-based tiers may understate absolute magnitude",
+            critical_count
+        ));
     }
 
     HealthIndex {
