@@ -606,7 +606,7 @@ fn cmd_health(args: HealthArgs) -> Result<i32> {
             println!();
             println!("  Sub-scores:");
             println!(
-                "    Risk:             {:.2}  (avg direct score, concentration)",
+                "    Risk:             {:.2}  (median direct score, concentration)",
                 health.risk_sub_score
             );
             println!(
