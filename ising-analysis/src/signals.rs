@@ -952,6 +952,11 @@ fn detect_orphan_functions(graph: &UnifiedGraph) -> Vec<Signal> {
             continue;
         }
 
+        // Skip functions in config/standalone files (scripts/, bin/, .config.ts, etc.)
+        if is_config_or_standalone_file(&node.file_path) {
+            continue;
+        }
+
         // Skip React/Vue components: PascalCase functions in .tsx/.jsx/.vue files
         // are called implicitly by the framework's component rendering
         if is_component_function(func_name, &node.file_path) {
@@ -1257,13 +1262,30 @@ fn detect_deprecated_usage(graph: &UnifiedGraph) -> Vec<Signal> {
 fn detect_stale_code(graph: &UnifiedGraph) -> Vec<Signal> {
     use ising_core::graph::NodeType;
 
-    // Parse last_changed timestamps and find the most recent commit in the repo
     let now_timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
     let stale_threshold_seconds: i64 = 365 * 86_400; // 1 year
+
+    // Pre-compute incoming counts per module (hoist outside the loop to avoid O(modules * edges))
+    let import_edges = graph.edges_of_type(&EdgeType::Imports);
+    let calls_edges = graph.edges_of_type(&EdgeType::Calls);
+    let mut incoming_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for (_, target, _) in &import_edges {
+        *incoming_counts.entry(target).or_default() += 1;
+    }
+    // Count only external calls (caller is outside the module) to avoid
+    // internally-chatty modules looking "heavily depended upon"
+    for (caller, callee, _) in &calls_edges {
+        if let Some(module_id) = callee.split("::").next()
+            && !caller.starts_with(module_id)
+        {
+            *incoming_counts.entry(module_id).or_default() += 1;
+        }
+    }
 
     let mut signals = Vec::new();
 
@@ -1275,10 +1297,9 @@ fn detect_stale_code(graph: &UnifiedGraph) -> Vec<Signal> {
 
         let metrics = match graph.change_metrics.get(node_id) {
             Some(m) => m,
-            None => continue, // No change data — can't assess staleness
+            None => continue,
         };
 
-        // Parse last_changed
         let last_changed_ts = metrics.last_changed.as_ref().and_then(|s| {
             chrono::DateTime::parse_from_rfc3339(s)
                 .ok()
@@ -1287,32 +1308,20 @@ fn detect_stale_code(graph: &UnifiedGraph) -> Vec<Signal> {
 
         let age_seconds = match last_changed_ts {
             Some(ts) => now_timestamp - ts,
-            None => continue, // Can't determine age
+            None => continue,
         };
 
-        // Only flag if unchanged for > threshold
         if age_seconds < stale_threshold_seconds {
             continue;
         }
 
-        // Check connectivity: count incoming edges (both imports and calls)
-        let import_edges = graph.edges_of_type(&EdgeType::Imports);
-        let calls_edges = graph.edges_of_type(&EdgeType::Calls);
-        let incoming_count = import_edges
-            .iter()
-            .filter(|(_, t, _)| *t == node_id)
-            .count()
-            + calls_edges
-                .iter()
-                .filter(|(_, t, _)| t.starts_with(node_id))
-                .count();
+        let incoming_count = incoming_counts.get(node_id).copied().unwrap_or(0);
 
-        // If heavily depended upon (>3 importers), it's stable not stale
+        // If heavily depended upon (>3 external importers/callers), it's stable not stale
         if incoming_count > 3 {
             continue;
         }
 
-        // Skip test files
         if is_test_file(node_id) {
             continue;
         }

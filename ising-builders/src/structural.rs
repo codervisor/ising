@@ -222,12 +222,26 @@ pub fn build_structural_graph(
                     continue;
                 }
 
-                // Strategy 2: Qualified call like "obj.method" -> try imported modules
+                // Strategy 2: Qualified call like "obj.method" -> only resolve when the
+                // qualifier matches a known import alias or module name to avoid false edges
                 if let Some(dot_pos) = callee.find('.') {
+                    let qualifier = &callee[..dot_pos];
                     let method = &callee[dot_pos + 1..];
                     if let Some(imports) = import_map.get(&result.module_id) {
                         let mut resolved = false;
                         for imp_module in imports {
+                            // Only match if the qualifier matches the imported module's
+                            // basename (e.g., "db" matches "utils/db.py")
+                            let imp_basename = imp_module
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(imp_module)
+                                .split('.')
+                                .next()
+                                .unwrap_or(imp_module);
+                            if qualifier != imp_basename {
+                                continue;
+                            }
                             let target_id = format!("{}::{}", imp_module, method);
                             if known_func_ids.contains(&target_id) {
                                 calls_to_add.push((caller_id.clone(), target_id));

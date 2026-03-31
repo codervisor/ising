@@ -63,8 +63,6 @@ pub fn build_change_graph(
     let mut file_churn: HashMap<String, u32> = HashMap::new();
     let mut co_changes: HashMap<(String, String), u32> = HashMap::new();
     let mut file_last_changed: HashMap<String, i64> = HashMap::new(); // file -> most recent commit timestamp
-    // Per-file hunk accumulator: file -> Vec<(line_start, line_count)> across all commits
-    let mut file_hunks: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
     let mut total_commits: u32 = 0;
     let mut skipped_large: u32 = 0;
     let mut skipped_old: u32 = 0;
@@ -134,9 +132,9 @@ pub fn build_change_graph(
             if commit_time > *entry {
                 *entry = commit_time;
             }
-            if !hunks.is_empty() {
-                file_hunks.entry(file.clone()).or_default().extend(hunks);
-            }
+            // Hunks are extracted but not yet consumed — placeholder for future
+            // hunk-to-symbol attribution (spec 041)
+            let _ = hunks;
         }
 
         if !changed_map.is_empty() {
