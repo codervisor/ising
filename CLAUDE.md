@@ -164,10 +164,17 @@ After fixing bugs in parsers, the risk model, health index, or signal detection:
    ```bash
    ./scripts/bench-oss-repos.sh   # Requires repos already cloned with --clone
    ```
-   - Confirm gin >= B and check odoo caveat status.
+   - If the full 29-repo benchmark is not feasible, run at minimum these 5 repos manually:
+     **flask** (small-repo bias), **gin** (Go calibration target, must be >= B),
+     **express** (small JS baseline), **django-rest-framework** (medium Python),
+     **fastapi** (large Python). These cover small/medium/large and multiple languages.
    - Compare results against `specs/042-oss-validation-round5-expanded/README.md`.
    - If a fix targets a specific repo (e.g., flask small-repo bias), verify that repo's grade changed as expected without regressing others.
 
 3. **Document what changed** in the spec or commit message:
    - Which repos were affected and how grades shifted.
    - Any new caveats or known limitations introduced.
+
+4. **This step is mandatory, not optional.** Unit tests alone cannot catch scoring regressions,
+   grade inflation/deflation, or parser failures on real-world code. Always run at least the
+   minimum validation set before pushing fixes to analysis code.
