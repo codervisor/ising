@@ -1,6 +1,7 @@
 ---
 status: complete
 created: 2026-03-31
+updated: 2026-04-01
 priority: medium
 tags:
   - validation
@@ -15,7 +16,7 @@ depends_on:
 
 # Spec 042: OSS Validation Round 5 — Expanded Benchmark
 
-**Date**: 2026-03-31
+**Date**: 2026-03-31 (initial), 2026-04-01 (Round 5b re-run after fixes)
 **Repos tested**: 29 (25 succeeded, 4 failed)
 **Languages covered**: Python, JS/TS, Go, Java, Rust, C/C++, Ruby, PHP
 
@@ -27,7 +28,7 @@ Aggressive expansion of the validation test set from 12 repos to 28, covering:
 - Massive monorepos (e.g., kubernetes and large JS/TS codebases)
 - Diverse architectural patterns (DI frameworks, compilers, distributed systems)
 
-## Results Table
+## Results Table (Round 5a — 2026-03-31, before fixes)
 
 ```
 Repository                Lang     Cat      Grade  Score   Total  Active   Risk   Sigs  Struc   #Sigs  Crit  High
@@ -63,12 +64,72 @@ rails                     Ruby     challngr  FAIL   ---     ---     ---    ---  
 php-src                   C        challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
 ```
 
-## Grade Distribution
+## Results Table (Round 5b — 2026-04-01, after fixes)
+
+Fixes applied:
+- Ruby/PHP `compute_complexity`: converted from recursive to iterative (stack overflow fix)
+- PHP `walk_node`: widened catch-all to recurse into any container node (0-node extraction fix)
+- Health index: dampened risk amplification for small samples (active_modules < 20)
+- Health index: added caveat when critical_count > 100
+
+```
+Repository                Lang     Cat      Grade  Score   Total  Active   Risk   Sigs  Struc   #Sigs  Crit  High
+-----------------------------------------------------------------------------------------------------------------
+flask                     Python   baseline     C   0.69      83      16   0.35   0.88   0.95      56     1     0
+django                    Python   challngr     B   0.73    3006     480   0.74   0.62   0.89     755     5    19
+django-rest-framework     Python   prev         A   0.95     175      58   0.87   1.00   1.00     108     1     2
+fastapi                   Python   prev         A   0.93    1513    1309   0.92   0.92   0.96    1020    14    52
+express                   JS/TS    baseline     A   0.85     142      17   0.63   1.00   1.00      18     1     0
+fastify                   JS/TS    challngr     A   0.93     287      88   0.83   1.00   1.00     124     1     4
+nest                      JS/TS    challngr     A   0.89    1679     184   0.73   1.00   1.00     289     2     8
+next.js                   JS/TS    challngr     A   0.96   22128   21971   0.97   0.94   1.00   13673   220   879
+svelte                    JS/TS    challngr     A   0.95    3372     603   0.90   0.96   1.00    1295     7    24
+gin                       Go       baseline     B   0.80      98      40   0.64   0.85   1.00     138     1     1
+ollama                    Go       prev         B   0.75    1303    1299   0.94   0.38   0.95    7776    13    52
+prometheus                Go       challngr     B   0.71     954     770   0.95   0.36   0.84    1761     8    31
+kubernetes                Go       challngr     C   0.63   17116    5450   0.92   0.30   0.61   33763    55   218
+kafka                     Java     challngr     C   0.59    6138    6129   0.89   0.27   0.57   23906    62   245
+spring-boot               Java     challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
+TypeScript                JS/TS    challngr     A   0.98   39421   26727   0.95   1.00   1.00    2257   268  1069
+rust                      Rust     challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
+deno                      Rust     challngr     A   0.94    4982    4909   0.97   0.87   0.99    5775    50   196
+pytorch                   C++/Py   challngr     B   0.72    9072    8915   0.91   0.44   0.80   31447    90   356
+transformers              Python   prev         C   0.62    4316    3837   0.74   0.32   0.85    5194    39   153
+vllm                      Python   prev         C   0.66    3019    2805   0.76   0.41   0.85    3874    29   112
+llama.cpp                 C/C++    prev         A   0.87    1112    1111   0.94   0.74   0.94    9997    12    44
+langchain                 Python   prev         A   0.96    2548    2351   0.91   0.98   1.00    2211    24    94
+open-webui                Python   prev         B   0.73     317     277   0.84   0.41   1.00     837     3    11
+ha-core                   Python   prev         B   0.75   16685   16683   0.84   0.53   0.90   12613   167   668
+grafana                   Go       prev         C   0.60   14984   14977   0.83   0.35   0.60   23150   150   599
+odoo                      Python   prev         A   0.94   14178   14146   0.93   0.92   0.97   11066   142   566
+rails                     Ruby     challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
+php-src                   C        challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
+```
+
+### Round 5a → 5b Comparison
+
+| Repo | 5a Grade | 5b Grade | Score Delta | Key Change |
+|------|:--------:|:--------:|:-----------:|------------|
+| flask | C (0.67) | C (0.69) | +0.02 | Risk 0.32→0.35 (small-repo amplification dampened) |
+| express | B (0.85) | A (0.85) | 0 | Same score, now hits A threshold (risk 0.62→0.63) |
+| All others | — | — | 0 | No grade or score changes |
+| spring-boot | FAIL | FAIL | — | `walk_node` recursion still crashes (not just `compute_complexity`) |
+| rails | FAIL | FAIL | — | Same `walk_node` recursion issue |
+| php-src | FAIL | FAIL | — | Needs deeper grammar-level investigation |
+| rust | FAIL | FAIL | — | 58K+ files, memory exhaustion (known limitation) |
+
+**Conclusion**: Fixes had minimal scoring impact — only flask's risk sub-score improved slightly.
+The `compute_complexity` iterative fix alone was insufficient for spring-boot/rails because the
+`walk_node` function itself is also recursive and crashes on deeply nested Ruby ASTs. The PHP
+parser's `walk_node` catch-all was widened but php-src still fails, suggesting the root cause
+is at the tree-sitter grammar level (C files misrouted or PHP test files with unusual structure).
+
+## Grade Distribution (Round 5b)
 
 | Grade | Count | Repos |
 |-------|-------|-------|
-| A | 11 | django-rest-framework, fastapi, fastify, nest, next.js, svelte, TypeScript, deno, llama.cpp, langchain, odoo |
-| B | 8 | django, express, gin, ollama, prometheus, pytorch, open-webui, ha-core |
+| A | 12 | django-rest-framework, fastapi, express, fastify, nest, next.js, svelte, TypeScript, deno, llama.cpp, langchain, odoo |
+| B | 7 | django, gin, ollama, prometheus, pytorch, open-webui, ha-core |
 | C | 6 | flask, kubernetes, kafka, transformers, vllm, grafana |
 | FAIL | 4 | spring-boot, rust, rails, php-src |
 
@@ -120,23 +181,27 @@ Repos getting A with high absolute signal counts:
 
 268 critical modules in TypeScript is objectively concerning regardless of the percentage. The percentile-based tier system makes this invisible to the health index.
 
-### 4. Small repo bias — flask gets C unfairly?
+### 4. Small repo bias — flask gets C unfairly? (PARTIALLY ADDRESSED)
 
-Flask (83 modules, 16 active) gets C (0.67) with risk sub-score 0.32. With only 16 active modules, a single high-risk file dominates. The risk sub-score formula may be too sensitive at very low N.
+Flask (83 modules, 16 active) got C (0.67) with risk sub-score 0.32 in Round 5a. **Fixed in Round 5b**: risk amplification now scales from 2x at 1 active module to 5x at 20, reducing single-file dominance. Flask moved to C (0.69) with risk 0.35 — directionally correct but modest improvement. The grade remains C because the signal sub-score (0.88) and structure (0.95) are the actual limiting factors, not just the risk formula.
 
-### 5. Parser failures
+### 5. Parser failures (PARTIALLY ADDRESSED)
 
-| Repo | Cause | Bug |
-|------|-------|-----|
-| spring-boot | Stack overflow in Ruby parser | Ruby `compute_complexity::walk` recurses too deeply on some .rb files in the Java repo |
-| rust | Stack overflow | 58K+ files overwhelm structural parser |
-| rails | Stack overflow in Ruby parser | Same Ruby parser recursion issue on real Ruby code |
-| php-src | PHP parser produces 0 nodes | PHP `extract_nodes` silently fails |
+| Repo | Cause | Round 5a | Round 5b | Status |
+|------|-------|----------|----------|--------|
+| spring-boot | Stack overflow in Ruby parser | FAIL | FAIL | `compute_complexity` fixed (iterative), but `walk_node` itself is also recursive and still crashes |
+| rust | Stack overflow on 58K+ files | FAIL | FAIL | Known LIMITATION — needs stack limit or chunked parsing |
+| rails | Stack overflow in Ruby parser | FAIL | FAIL | Same `walk_node` recursion as spring-boot |
+| php-src | PHP parser produces 0 nodes | FAIL | FAIL | `walk_node` catch-all widened, `compute_complexity` made iterative, but root cause is likely tree-sitter grammar-level (C files in php-src not parsed as PHP) |
 
-**Action items**:
-- Ruby parser needs iterative complexity walk (not recursive) — BUG
+**Fixed in Round 5b**:
+- Ruby/PHP `compute_complexity`: converted from recursive to iterative with explicit stack
+- PHP `walk_node` catch-all: widened to recurse into any container node (was limited to 3 types)
+
+**Remaining action items**:
+- Ruby/PHP `walk_node` needs iterative conversion (same recursion pattern as `compute_complexity`) — BUG
 - rust-lang/rust needs memory/stack limit handling for massive repos — LIMITATION
-- PHP parser needs investigation — BUG
+- php-src needs grammar-level investigation — the repo is mostly C code, `.php` test files may have unusual structure — BUG
 
 ### 6. Go repos consistently penalized
 
@@ -160,31 +225,29 @@ The Go intra-package suppression fix (GAP-13) may not be fully effective, or Go'
 
 ## Recommendations
 
-1. **Investigate TypeScript A grade**: checker.ts should trigger god_module but likely doesn't due to function-level module splitting. Consider file-level aggregation for god module detection.
-
-2. **Flask small-repo penalty**: Consider floor on risk sub-score when active_modules < 20 to prevent single-file dominance.
-
-3. **Fix Ruby parser stack overflow**: Convert recursive `compute_complexity::walk` to iterative with explicit stack.
-
-4. **Fix PHP parser**: Investigate why extract_nodes produces 0 nodes on php-src.
-
-5. **Review Go signal rates**: Compare per-module signal density between Go and Python repos of similar size to check for Go-specific bias.
-
-6. **Absolute critical count caveat**: When critical_count > 100, consider emitting a caveat regardless of grade, since percentile-based tiers hide the absolute magnitude.
+| # | Recommendation | Status |
+|---|---------------|--------|
+| 1 | Investigate TypeScript A grade: checker.ts should trigger god_module but likely doesn't due to function-level module splitting | OPEN |
+| 2 | Flask small-repo penalty: floor risk amplification when active_modules < 20 | **DONE** (Round 5b) — amplification scales 2x→5x, flask risk 0.32→0.35 |
+| 3 | Fix Ruby parser stack overflow: convert recursive walks to iterative | **PARTIAL** — `compute_complexity` fixed, `walk_node` still recursive |
+| 4 | Fix PHP parser: investigate why extract_nodes produces 0 nodes on php-src | **PARTIAL** — `walk_node` catch-all widened + iterative complexity, but php-src still fails |
+| 5 | Review Go signal rates: compare per-module signal density between Go and Python repos | OPEN |
+| 6 | Absolute critical count caveat: emit when critical_count > 100 | **DONE** (Round 5b) — caveat now emitted in health index |
+| 7 | Convert Ruby `walk_node` to iterative (same recursion pattern as `compute_complexity`) | NEW — required to fix spring-boot/rails |
+| 8 | Convert PHP `walk_node` to iterative for consistency | NEW |
+| 9 | Investigate php-src at tree-sitter grammar level | NEW — likely C files misrouted or unusual PHP test structure |
 
 ## SOP: Routine Benchmark
 
 A reusable benchmark script has been created at `scripts/bench-oss-repos.sh`.
+Missing repos are auto-cloned on first run.
 
 ```bash
-# First time: clone all repos
-./scripts/bench-oss-repos.sh --clone
-
-# Subsequent runs (repos already cloned)
+# Run benchmark (auto-clones any missing repos)
 ./scripts/bench-oss-repos.sh
 
-# Custom output directory
-./scripts/bench-oss-repos.sh --output /path/to/results
+# Custom repos/output directory
+./scripts/bench-oss-repos.sh --repos-dir /path/to/repos --output /path/to/results
 ```
 
 Run this script:
@@ -193,3 +256,7 @@ Run this script:
 - After any change to health index computation
 - After adding or modifying language parsers
 - Before any release
+
+See also: **Post-Fix Verification SOP** in `CLAUDE.md` for the mandatory minimum 5-repo
+validation set (flask, gin, express, django-rest-framework, fastapi) when the full benchmark
+is not feasible.
