@@ -148,3 +148,26 @@ Cross-layer anomalies detected in `ising-analysis/src/signals.rs`:
 5. Add tree-sitter dispatch in `ising-builders/src/structural.rs` (both `get_tree_sitter_language` and extract match)
 
 **Supported languages**: Python, TypeScript, JavaScript, Rust, Go, Vue, Java, C#, PHP, Ruby, Kotlin, C, C++
+
+## Post-Fix Verification SOP
+
+After fixing bugs in parsers, the risk model, health index, or signal detection:
+
+1. **Run the full CI check locally** before committing:
+   ```bash
+   cargo test --workspace         # All tests must pass
+   cargo clippy --workspace -- -D warnings  # No warnings
+   cargo fmt --check              # Clean formatting
+   ```
+
+2. **Run the OSS benchmark** to check for regressions and verify the fix's impact:
+   ```bash
+   ./scripts/bench-oss-repos.sh   # Requires repos already cloned with --clone
+   ```
+   - Confirm gin >= B and check odoo caveat status.
+   - Compare results against `specs/042-oss-validation-round5-expanded/README.md`.
+   - If a fix targets a specific repo (e.g., flask small-repo bias), verify that repo's grade changed as expected without regressing others.
+
+3. **Document what changed** in the spec or commit message:
+   - Which repos were affected and how grades shifted.
+   - Any new caveats or known limitations introduced.
