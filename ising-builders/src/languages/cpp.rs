@@ -25,6 +25,8 @@ pub fn extract_nodes(
     );
 }
 
+/// Iterative AST walk using an explicit stack to avoid stack overflow
+/// on deeply nested C++ ASTs.
 #[allow(clippy::too_many_arguments)]
 fn walk_node(
     node: tree_sitter::Node<'_>,
@@ -36,72 +38,50 @@ fn walk_node(
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "function_definition" => {
-                extract_function(child, source, current_class, functions);
-            }
-            "class_specifier" | "struct_specifier" => {
-                // Only extract definitions with body
-                if has_body(child) {
-                    extract_class(
+    // Stack of (node_to_iterate_children_of, current_class_context)
+    let mut stack: Vec<(tree_sitter::Node<'_>, Option<String>)> =
+        vec![(node, current_class.map(|s| s.to_string()))];
+
+    while let Some((current, cls_ctx)) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            match child.kind() {
+                "function_definition" => {
+                    extract_function(child, source, cls_ctx.as_deref(), functions);
+                }
+                "class_specifier" | "struct_specifier" => {
+                    if has_body(child) {
+                        extract_class_iterative(child, source, &mut stack, classes);
+                    }
+                }
+                "enum_specifier" => {
+                    if has_body(child) {
+                        extract_enum(child, source, classes);
+                    }
+                }
+                "namespace_definition" => {
+                    if let Some(body) = child.child_by_field_name("body") {
+                        stack.push((body, cls_ctx.clone()));
+                    }
+                }
+                "preproc_include" => {
+                    super::c_lang::extract_include_from(
                         child,
                         source,
                         relative_path,
                         repo_path,
-                        functions,
-                        classes,
                         imports,
                     );
                 }
-            }
-            "enum_specifier" => {
-                if has_body(child) {
-                    extract_enum(child, source, classes);
+                "template_declaration" => {
+                    // Push template content for iterative processing
+                    stack.push((child, cls_ctx.clone()));
                 }
-            }
-            "namespace_definition" => {
-                // Recurse into namespace body
-                if let Some(body) = child.child_by_field_name("body") {
-                    walk_node(
-                        body,
-                        source,
-                        relative_path,
-                        repo_path,
-                        current_class,
-                        functions,
-                        classes,
-                        imports,
-                    );
+                "declaration" | "access_specifier" | "field_declaration" | "friend_declaration" => {
+                    // Skip forward declarations and class-body-only nodes
                 }
+                _ => {}
             }
-            "preproc_include" => {
-                super::c_lang::extract_include_from(
-                    child,
-                    source,
-                    relative_path,
-                    repo_path,
-                    imports,
-                );
-            }
-            "template_declaration" => {
-                // Recurse into template content
-                walk_node(
-                    child,
-                    source,
-                    relative_path,
-                    repo_path,
-                    current_class,
-                    functions,
-                    classes,
-                    imports,
-                );
-            }
-            "declaration" => {
-                // Skip forward declarations
-            }
-            _ => {}
         }
     }
 }
@@ -143,14 +123,12 @@ fn extract_function(
     });
 }
 
-fn extract_class(
-    node: tree_sitter::Node<'_>,
+/// Extract class info and push body onto the iterative walk stack.
+fn extract_class_iterative<'a>(
+    node: tree_sitter::Node<'a>,
     source: &str,
-    relative_path: &str,
-    repo_path: &Path,
-    functions: &mut Vec<FunctionInfo>,
+    stack: &mut Vec<(tree_sitter::Node<'a>, Option<String>)>,
     classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
 ) {
     let name = node
         .child_by_field_name("name")
@@ -171,68 +149,9 @@ fn extract_class(
         deprecated: false,
     });
 
-    // Extract inline methods from class body
+    // Push class body onto stack with class context
     if let Some(body) = node.child_by_field_name("body") {
-        walk_class_body(
-            body,
-            source,
-            relative_path,
-            repo_path,
-            &name,
-            functions,
-            classes,
-            imports,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_class_body(
-    node: tree_sitter::Node<'_>,
-    source: &str,
-    relative_path: &str,
-    repo_path: &Path,
-    class_name: &str,
-    functions: &mut Vec<FunctionInfo>,
-    classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
-) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "function_definition" => {
-                extract_function(child, source, Some(class_name), functions);
-            }
-            "class_specifier" | "struct_specifier" => {
-                if has_body(child) {
-                    extract_class(
-                        child,
-                        source,
-                        relative_path,
-                        repo_path,
-                        functions,
-                        classes,
-                        imports,
-                    );
-                }
-            }
-            "access_specifier" | "field_declaration" | "friend_declaration" => {
-                // Skip these
-            }
-            "template_declaration" => {
-                walk_class_body(
-                    child,
-                    source,
-                    relative_path,
-                    repo_path,
-                    class_name,
-                    functions,
-                    classes,
-                    imports,
-                );
-            }
-            _ => {}
-        }
+        stack.push((body, Some(name)));
     }
 }
 

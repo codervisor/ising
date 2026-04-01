@@ -17,7 +17,8 @@ pub fn extract_nodes(
     walk_node(node, source, &psr4_map, None, functions, classes, imports);
 }
 
-/// Recursively walk the AST to handle namespaces and nested structures.
+/// Iterative AST walk using an explicit stack to avoid stack overflow
+/// on deeply nested PHP ASTs.
 fn walk_node(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -27,116 +28,98 @@ fn walk_node(
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "function_definition" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let raw_name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = if let Some(cls) = current_class {
-                        format!("{}::{}", cls, raw_name)
-                    } else {
-                        raw_name
-                    };
-                    let complexity = compute_complexity(child);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        calls: Vec::new(),
-                        deprecated: false,
-                    });
-                }
-            }
-            "method_declaration" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let raw_name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = if let Some(cls) = current_class {
-                        format!("{}::{}", cls, raw_name)
-                    } else {
-                        raw_name
-                    };
-                    let complexity = compute_complexity(child);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        calls: Vec::new(),
-                        deprecated: false,
-                    });
-                }
-            }
-            "class_declaration"
-            | "interface_declaration"
-            | "trait_declaration"
-            | "enum_declaration" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child);
-                    classes.push(ClassInfo {
-                        name: name.clone(),
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        deprecated: false,
-                    });
-                    // Recurse into class body for methods
-                    if let Some(body) = child.child_by_field_name("body") {
-                        walk_node(
-                            body,
-                            source,
-                            psr4_map,
-                            Some(&name),
-                            functions,
-                            classes,
-                            imports,
-                        );
+    // Stack of (node_to_iterate_children_of, current_class_context)
+    let mut stack: Vec<(tree_sitter::Node<'_>, Option<String>)> =
+        vec![(node, current_class.map(|s| s.to_string()))];
+
+    while let Some((current, cls_ctx)) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            match child.kind() {
+                "function_definition" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let raw_name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = if let Some(cls) = &cls_ctx {
+                            format!("{}::{}", cls, raw_name)
+                        } else {
+                            raw_name
+                        };
+                        let complexity = compute_complexity(child);
+                        functions.push(FunctionInfo {
+                            name,
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            calls: Vec::new(),
+                            deprecated: false,
+                        });
                     }
                 }
-            }
-            "namespace_use_declaration" => {
-                extract_use_import(child, source, psr4_map, imports);
-            }
-            "namespace_definition" => {
-                // Recurse into namespace body
-                if let Some(body) = child.child_by_field_name("body") {
-                    walk_node(
-                        body,
-                        source,
-                        psr4_map,
-                        current_class,
-                        functions,
-                        classes,
-                        imports,
-                    );
+                "method_declaration" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let raw_name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = if let Some(cls) = &cls_ctx {
+                            format!("{}::{}", cls, raw_name)
+                        } else {
+                            raw_name
+                        };
+                        let complexity = compute_complexity(child);
+                        functions.push(FunctionInfo {
+                            name,
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            calls: Vec::new(),
+                            deprecated: false,
+                        });
+                    }
                 }
-            }
-            _ => {
-                // Recurse into any container node that may hold declarations.
-                // The previous allowlist (program, declaration_list, compound_statement)
-                // missed nodes like expression_statement, if_statement, and other
-                // wrappers, causing 0 nodes extracted on repos like php-src.
-                if child.named_child_count() > 0 {
-                    walk_node(
-                        child,
-                        source,
-                        psr4_map,
-                        current_class,
-                        functions,
-                        classes,
-                        imports,
-                    );
+                "class_declaration"
+                | "interface_declaration"
+                | "trait_declaration"
+                | "enum_declaration" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let complexity = compute_complexity(child);
+                        classes.push(ClassInfo {
+                            name: name.clone(),
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            deprecated: false,
+                        });
+                        // Push class body with updated class context
+                        if let Some(body) = child.child_by_field_name("body") {
+                            stack.push((body, Some(name)));
+                        }
+                    }
+                }
+                "namespace_use_declaration" => {
+                    extract_use_import(child, source, psr4_map, imports);
+                }
+                "namespace_definition" => {
+                    // Push namespace body for iterative processing
+                    if let Some(body) = child.child_by_field_name("body") {
+                        stack.push((body, cls_ctx.clone()));
+                    }
+                }
+                _ => {
+                    // Push any container node that may hold declarations.
+                    // The previous allowlist (program, declaration_list, compound_statement)
+                    // missed nodes like expression_statement, if_statement, and other
+                    // wrappers, causing 0 nodes extracted on repos like php-src.
+                    if child.named_child_count() > 0 {
+                        stack.push((child, cls_ctx.clone()));
+                    }
                 }
             }
         }

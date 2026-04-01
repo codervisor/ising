@@ -27,6 +27,8 @@ pub fn extract_nodes(
     );
 }
 
+/// Iterative AST walk using an explicit stack to avoid stack overflow
+/// on deeply nested Ruby ASTs (e.g., large Rails codebases like spring-boot).
 #[allow(clippy::too_many_arguments)]
 fn walk_node(
     node: tree_sitter::Node<'_>,
@@ -39,103 +41,89 @@ fn walk_node(
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "method" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let raw_name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = if let Some(cls) = current_class {
-                        format!("{}::{}", cls, raw_name)
-                    } else {
-                        raw_name
-                    };
-                    let complexity = compute_complexity(child);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        calls: Vec::new(),
-                        deprecated: false,
-                    });
-                }
-            }
-            "singleton_method" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let raw_name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = if let Some(cls) = current_class {
-                        format!("{}::self.{}", cls, raw_name)
-                    } else {
-                        format!("self.{}", raw_name)
-                    };
-                    let complexity = compute_complexity(child);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        calls: Vec::new(),
-                        deprecated: false,
-                    });
-                }
-            }
-            "class" | "module" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child);
-                    classes.push(ClassInfo {
-                        name: name.clone(),
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        deprecated: false,
-                    });
-                    // Recurse into class/module body
-                    if let Some(body) = child.child_by_field_name("body") {
-                        walk_node(
-                            body,
-                            source,
-                            relative_path,
-                            repo_path,
-                            is_rails,
-                            Some(&name),
-                            functions,
-                            classes,
-                            imports,
-                        );
+    // Stack of (node_to_iterate_children_of, current_class_context)
+    let mut stack: Vec<(tree_sitter::Node<'_>, Option<String>)> =
+        vec![(node, current_class.map(|s| s.to_string()))];
+
+    while let Some((current, cls_ctx)) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            match child.kind() {
+                "method" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let raw_name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = if let Some(cls) = &cls_ctx {
+                            format!("{}::{}", cls, raw_name)
+                        } else {
+                            raw_name
+                        };
+                        let complexity = compute_complexity(child);
+                        functions.push(FunctionInfo {
+                            name,
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            calls: Vec::new(),
+                            deprecated: false,
+                        });
                     }
                 }
-            }
-            "call" => {
-                extract_require(child, source, relative_path, repo_path, is_rails, imports);
-            }
-            _ => {
-                // Recurse into container nodes
-                if child.named_child_count() > 0
-                    && child.kind() != "method"
-                    && child.kind() != "singleton_method"
-                {
-                    walk_node(
-                        child,
-                        source,
-                        relative_path,
-                        repo_path,
-                        is_rails,
-                        current_class,
-                        functions,
-                        classes,
-                        imports,
-                    );
+                "singleton_method" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let raw_name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = if let Some(cls) = &cls_ctx {
+                            format!("{}::self.{}", cls, raw_name)
+                        } else {
+                            format!("self.{}", raw_name)
+                        };
+                        let complexity = compute_complexity(child);
+                        functions.push(FunctionInfo {
+                            name,
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            calls: Vec::new(),
+                            deprecated: false,
+                        });
+                    }
+                }
+                "class" | "module" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let complexity = compute_complexity(child);
+                        classes.push(ClassInfo {
+                            name: name.clone(),
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            deprecated: false,
+                        });
+                        // Push class/module body with updated class context
+                        if let Some(body) = child.child_by_field_name("body") {
+                            stack.push((body, Some(name)));
+                        }
+                    }
+                }
+                "call" => {
+                    extract_require(child, source, relative_path, repo_path, is_rails, imports);
+                }
+                _ => {
+                    // Push container nodes for iterative processing
+                    if child.named_child_count() > 0
+                        && child.kind() != "method"
+                        && child.kind() != "singleton_method"
+                    {
+                        stack.push((child, cls_ctx.clone()));
+                    }
                 }
             }
         }
