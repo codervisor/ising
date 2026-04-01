@@ -3,7 +3,7 @@ status: complete
 created: 2026-03-31
 updated: 2026-04-01
 priority: medium
-last_benchmark: 2026-04-01-round5c
+last_benchmark: 2026-04-01-round5d
 tags:
   - validation
   - benchmark
@@ -145,6 +145,80 @@ is at the tree-sitter grammar level (C files misrouted or PHP test files with un
 
 **Net change from Round 5b**: 3 repos moved from FAIL → A (spring-boot, rails, php-src). Only rust remains FAIL (memory exhaustion on 58K+ files, known limitation).
 
+## Results Table (Round 5d — 2026-04-01, after monolith god module detection)
+
+Fixes applied:
+- God module detection: added monolith path (LOC >= 5000 AND complexity >= 200) that fires regardless of CBO
+- Vendor path exclusion: fixed `is_generated_code` to match `vendor/` at path start (not just `/vendor/`)
+- Documented orphan signal zero-weighting rationale in stress.rs
+- Updated Odoo blind spot documentation in CLAUDE.md
+
+### Full run (29 repos: 28 succeeded, 1 failed)
+
+```
+Repository                Lang     Cat      Grade  Score   Total  Active   Risk   Sigs  Struc   #Sigs  Crit  High
+-----------------------------------------------------------------------------------------------------------------
+flask                     Python   baseline     C   0.69      83      16   0.35   0.88   0.95      56     1     0
+django                    Python   challngr     B   0.73    3006     480   0.74   0.62   0.89     755     5    19
+django-rest-framework     Python   prev         A   0.95     175      58   0.87   1.00   1.00     108     1     2
+fastapi                   Python   prev         A   0.93    1513    1309   0.92   0.92   0.96    1020    14    52
+express                   JS/TS    baseline     A   0.85     142      17   0.64   1.00   1.00      18     1     0
+fastify                   JS/TS    challngr     A   0.93     287      88   0.83   1.00   1.00     124     1     4
+nest                      JS/TS    challngr     A   0.89    1679     184   0.73   1.00   1.00     289     2     8
+next.js                   JS/TS    challngr     A   0.93   22128   21971   0.97   0.84   1.00   13693   220   879
+svelte                    JS/TS    challngr     A   0.96    3374    3374   0.94   0.97   1.00    1483    34   135
+gin                       Go       baseline     B   0.80      98      40   0.64   0.85   1.00     138     1     1
+ollama                    Go       prev         B   0.74    1303    1299   0.94   0.36   0.95    7803    13    52
+prometheus                Go       challngr     B   0.71     954     770   0.95   0.36   0.84    1762     8    31
+kubernetes                Go       challngr     C   0.63   17116    5450   0.92   0.30   0.61   33767    55   218
+kafka                     Java     challngr     C   0.59    6138    6129   0.89   0.27   0.57   23906    62   245
+spring-boot               Java     challngr     A   0.85    9108    9108   0.85   0.81   0.92   15613    92   364
+TypeScript                JS/TS    challngr     A   0.97   39421   26727   0.95   0.97   1.00    2263   268  1069
+rust                      Rust     challngr  FAIL   ---     ---     ---    ---    ---    ---     ---   ---   ---
+deno                      Rust     challngr     A   0.92    4993    4920   0.97   0.81   0.99    5792    50   196
+pytorch                   C++/Py   challngr     B   0.71    9073    8916   0.91   0.42   0.80   31506    90   356
+transformers              Python   prev         C   0.62    4316    3837   0.74   0.32   0.85    5194    39   153
+vllm                      Python   prev         C   0.66    3021    2807   0.76   0.41   0.85    3889    29   112
+llama.cpp                 C/C++    prev         B   0.85    1112    1111   0.94   0.68   0.94   10020    12    44
+langchain                 Python   prev         A   0.95    2548    2351   0.91   0.97   1.00    2212    24    94
+open-webui                Python   prev         B   0.73     317     277   0.84   0.41   1.00     837     3    11
+ha-core                   Python   prev         B   0.75   16685   16683   0.84   0.54   0.91   12607   167   668
+grafana                   Go       prev         C   0.60   14987   14980   0.83   0.35   0.60   23162   150   599
+odoo                      Python   prev         A   0.93   14179   14147   0.93   0.89   0.97   11072   142   566
+rails                     Ruby     challngr     A   0.93    3476     847   0.85   0.98   1.00     745     9    34
+php-src                   C        challngr     A   0.85    2393    2244   0.95   0.64   0.99   22453    23    90
+```
+
+### Round 5c → 5d Comparison
+
+| Repo | 5c Grade | 5d Grade | Score Delta | Key Change |
+|------|:--------:|:--------:|:-----------:|------------|
+| TypeScript | A (0.98) | A (0.97) | -0.01 | 6 monolith god modules now detected (was 0), incl. checker.ts |
+| next.js | A (0.96) | A (0.93) | -0.03 | Monolith modules detected, sigs 0.94→0.84 |
+| deno | A (0.94) | A (0.92) | -0.02 | Monolith modules detected, sigs 0.87→0.81 |
+| llama.cpp | A (0.88) | **B (0.85)** | -0.03 | 6 monolith god modules (ggml-vulkan, ops.cpp, etc.) — legitimate |
+| langchain | A (0.96) | A (0.95) | -0.01 | Minor monolith detection |
+| odoo | A (0.94) | A (0.93) | -0.01 | Minor increase in god_module count |
+| php-src | A (0.90) | A (0.85) | -0.05 | Additional monolith C files detected |
+| ollama | B (0.75) | B (0.74) | -0.01 | Minor increase |
+| All others | — | — | 0 | No changes |
+
+**Conclusion**: Monolith detection working as intended. TypeScript's checker.ts (50K LOC, complexity 16K)
+is now flagged as a god module. The grade dropped 0.98→0.97 (still A due to massive module count diluting
+the signal). llama.cpp moved A→B due to 6 legitimate monolith C/C++ files being detected. No false
+regressions.
+
+### Grade Distribution (Round 5d)
+
+| Grade | Count | Repos |
+|-------|-------|-------|
+| A | 14 | django-rest-framework, fastapi, express, fastify, nest, next.js, svelte, spring-boot, TypeScript, deno, langchain, odoo, rails, php-src |
+| B | 8 | django, gin, ollama, prometheus, pytorch, llama.cpp, open-webui, ha-core |
+| C | 6 | flask, kubernetes, kafka, transformers, vllm, grafana |
+| FAIL | 1 | rust |
+
+**Net change from Round 5c**: llama.cpp moved A→B (legitimate monolith detection). All other grades unchanged.
+
 ## Calibration Check Results
 
 ### PASS: gin >= B
@@ -241,7 +315,7 @@ The Go intra-package suppression fix (GAP-13) may not be fully effective, or Go'
 
 | # | Recommendation | Status |
 |---|---------------|--------|
-| 1 | Investigate TypeScript A grade: checker.ts should trigger god_module but likely doesn't due to function-level module splitting | OPEN |
+| 1 | Investigate TypeScript A grade: checker.ts should trigger god_module but likely doesn't due to function-level module splitting | **DONE** (Round 5d) — Added monolith detection path (LOC>=5000, complexity>=200) regardless of CBO. checker.ts now detected. TypeScript score 0.98→0.97, still A due to 39K module sqrt(N) dilution |
 | 2 | Flask small-repo penalty: floor risk amplification when active_modules < 20 | **DONE** (Round 5b) — amplification scales 2x→5x, flask risk 0.32→0.35 |
 | 3 | Fix Ruby parser stack overflow: convert recursive walks to iterative | **DONE** (Round 5c) — both `compute_complexity` and `walk_node` now iterative |
 | 4 | Fix PHP parser: investigate why extract_nodes produces 0 nodes on php-src | **DONE** (Round 5c) — `walk_node` converted to iterative + catch-all widened; php-src now succeeds (A, 0.90) |
