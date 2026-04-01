@@ -301,8 +301,8 @@ fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
             }
             "binary" => {
                 if let Some(op) = current.child_by_field_name("operator") {
-                    let op_text = op.utf8_text(&[]).unwrap_or("");
-                    if op_text == "&&" || op_text == "||" || op_text == "and" || op_text == "or" {
+                    let op_kind = op.kind();
+                    if op_kind == "&&" || op_kind == "||" || op_kind == "and" || op_kind == "or" {
                         decisions += 1;
                     }
                 }

@@ -721,8 +721,9 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     // to prevent a single hot file from dominating (e.g., flask: 16 active modules,
     // one high-risk file pulls risk_sub_score from ~0.7 to 0.32).
     let amplification = if active_modules < 20 {
-        // Scale from 2.0 at 1 module to 5.0 at 20 modules
-        2.0 + 3.0 * (active_modules as f64 / 20.0)
+        // Scale from 2.0 at 1 module toward 5.0 as we approach 20 modules
+        let normalized = (active_modules as f64 - 1.0) / 19.0;
+        2.0 + 3.0 * normalized
     } else {
         5.0
     };
