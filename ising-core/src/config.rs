@@ -66,6 +66,12 @@ pub struct ThresholdConfig {
     /// Minimum fan-out for god module signal.
     #[serde(default = "default_god_module_fan_out")]
     pub god_module_fan_out: usize,
+    /// Minimum LOC for monolith detection (god module without CBO requirement).
+    #[serde(default = "default_god_module_monolith_loc")]
+    pub god_module_monolith_loc: u32,
+    /// Minimum complexity for monolith detection (god module without CBO requirement).
+    #[serde(default = "default_god_module_monolith_complexity")]
+    pub god_module_monolith_complexity: u32,
     /// Minimum number of co-changing files for shotgun surgery signal.
     #[serde(default = "default_shotgun_surgery_breadth")]
     pub shotgun_surgery_breadth: usize,
@@ -174,6 +180,12 @@ fn default_god_module_loc() -> u32 {
 fn default_god_module_fan_out() -> usize {
     15
 }
+fn default_god_module_monolith_loc() -> u32 {
+    5000
+}
+fn default_god_module_monolith_complexity() -> u32 {
+    200
+}
 fn default_shotgun_surgery_breadth() -> usize {
     8
 }
@@ -213,6 +225,8 @@ impl Default for ThresholdConfig {
             god_module_complexity: default_god_module_complexity(),
             god_module_loc: default_god_module_loc(),
             god_module_fan_out: default_god_module_fan_out(),
+            god_module_monolith_loc: default_god_module_monolith_loc(),
+            god_module_monolith_complexity: default_god_module_monolith_complexity(),
             shotgun_surgery_breadth: default_shotgun_surgery_breadth(),
             unstable_dep_gap: default_unstable_dep_gap(),
         }

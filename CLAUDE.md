@@ -64,7 +64,7 @@ Grade thresholds: A ≥ 0.85, B ≥ 0.70, C ≥ 0.55, D ≥ 0.40, F < 0.40.
 
 ### Known detector blind spots
 
-- **Odoo gets A** -- god module thresholds (complexity≥50, LOC≥500, CBO≥15) miss distributed complexity across thousands of moderately-complex files. **Partially addressed**: `SystemicComplexity` signal now detects elevated median/P75 complexity. Validate against Odoo to confirm grade impact.
+- **Odoo gets A** -- god module thresholds (complexity≥50, LOC≥500, CBO≥15) miss distributed complexity across thousands of moderately-complex files. `SystemicComplexity` signal detects elevated median/P75 complexity but fires 0 times for Odoo. The modules are moderately complex but individually below thresholds. This is a genuine detection gap — would require a "ratio of modules above moderate complexity" metric to fix. **Status**: known limitation, documented.
 - **Go repos over-penalized** -- package-level imports inflate ghost coupling and unnecessary abstraction counts (GAP-13). **Addressed**: Go intra-package pairs now suppressed in both ghost coupling and unnecessary abstraction detection.
 - **Cross-crate call resolution blind** -- In Rust workspaces, `pub fn` called from another crate shows as orphan function because call resolution is intra-file only. Same applies to JS/TS cross-file imports. **Tracked**: spec 041 Phase 3A/3B.
 - **Dispatch/callback calls invisible** -- Functions called via match dispatch, passed as callbacks, or invoked through trait objects don't create `Calls` edges. Inherent limitation of AST-based static analysis.

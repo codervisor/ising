@@ -751,6 +751,12 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         + (signals.unstable_dep_count as f64 / sqrt_n) * 2.0
         + (signals.ghost_coupling_count as f64 / sqrt_n) * 1.0
         + (signals.systemic_complexity_count as f64) * 2.5;
+    // Note: OrphanFunction, OrphanModule, and IntraFileHotspot are intentionally zero-weighted.
+    // They represent AST analysis limitations (cross-file calls invisible to static analysis),
+    // not reliable architectural signals. Weighting them would over-penalize every repo —
+    // e.g., TypeScript has 2,124 orphan_function signals that are mostly unresolved cross-file
+    // calls, not actual dead code.
+    //
     // Scale factor of 0.3: calibrated so that weighted_signal_score=2 → sub_score ≈ 0.63
     let signal_sub_score = (1.0 / (1.0 + weighted_signal_score * 0.3)).clamp(0.0, 1.0);
 

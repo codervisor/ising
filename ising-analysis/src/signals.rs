@@ -540,11 +540,14 @@ fn detect_god_modules(
         // inner functions, which inflates the score and causes false positives.
         let cbo = metrics.cbo;
 
+        let is_test = is_test_file(node_id);
+        let is_generated = is_generated_code(node_id);
+
         if complexity >= thresholds.god_module_complexity
             && loc >= thresholds.god_module_loc
             && cbo >= thresholds.god_module_fan_out
-            && !is_test_file(node_id)
-            && !is_generated_code(node_id)
+            && !is_test
+            && !is_generated
         {
             let severity = (complexity as f64 / 50.0) * (loc as f64 / 500.0) * (cbo as f64 / 15.0);
             signals.push(Signal::new(
@@ -554,6 +557,26 @@ fn detect_god_modules(
                 severity,
                 format!(
                     "God module: complexity {}, {} LOC, {} external dependencies (cbo). Split into focused modules.",
+                    complexity, loc, cbo
+                ),
+            ));
+        } else if loc >= thresholds.god_module_monolith_loc
+            && complexity >= thresholds.god_module_monolith_complexity
+            && !is_test
+            && !is_generated
+        {
+            // Monolith detection: catches self-contained god modules with low external
+            // coupling (e.g., TypeScript's checker.ts: 50K LOC, complexity 16K, CBO=0).
+            // Thresholds are 10x LOC / 4x complexity vs normal god_module, so this only
+            // fires on genuinely extreme cases.
+            let severity = (complexity as f64 / 50.0) * (loc as f64 / 500.0);
+            signals.push(Signal::new(
+                SignalType::GodModule,
+                node_id,
+                None,
+                severity,
+                format!(
+                    "Monolith module: complexity {}, {} LOC, {} external dependencies (low coupling but extreme size). Split into focused modules.",
                     complexity, loc, cbo
                 ),
             ));
@@ -842,7 +865,9 @@ fn is_generated_code(path: &str) -> bool {
                 || filename.ends_with(".py")))
         // Lock / vendor files that look like source
         || path.contains("/vendor/")
+        || path.starts_with("vendor/")
         || path.contains("/third_party/")
+        || path.starts_with("third_party/")
 }
 
 /// Aggregate signal counts for health index computation.
