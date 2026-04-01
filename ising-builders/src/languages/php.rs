@@ -258,10 +258,9 @@ fn compute_complexity(node: tree_sitter::Node<'_>) -> u32 {
                 decisions += 1;
             }
             "case_statement" => {
-                let text = current.utf8_text(&[]).unwrap_or("");
-                if !text.starts_with("default") {
-                    decisions += 1;
-                }
+                // default is a separate node kind (default_statement), so all
+                // case_statement nodes are non-default cases worth counting.
+                decisions += 1;
             }
             "match_conditional_expression" => {
                 decisions += 1;
