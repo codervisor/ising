@@ -3,6 +3,7 @@ status: complete
 created: 2026-03-31
 updated: 2026-04-01
 priority: medium
+last_benchmark: 2026-04-01-round5c
 tags:
   - validation
   - benchmark
@@ -133,6 +134,16 @@ is at the tree-sitter grammar level (C files misrouted or PHP test files with un
 | C | 6 | flask, kubernetes, kafka, transformers, vllm, grafana |
 | FAIL | 4 | spring-boot, rust, rails, php-src |
 
+## Grade Distribution (Round 5c — tested repos only)
+
+| Grade | Count | Repos |
+|-------|-------|-------|
+| A | 6 | express, django-rest-framework, fastapi, **spring-boot**, **rails**, **php-src** |
+| B | 1 | gin |
+| C | 1 | flask |
+
+**Net change from Round 5b**: 3 repos moved from FAIL → A (spring-boot, rails, php-src). Only rust remains FAIL (not tested, known memory limitation).
+
 ## Calibration Check Results
 
 ### PASS: gin >= B
@@ -185,23 +196,25 @@ Repos getting A with high absolute signal counts:
 
 Flask (83 modules, 16 active) got C (0.67) with risk sub-score 0.32 in Round 5a. **Fixed in Round 5b**: risk amplification now scales from 2x at 1 active module to 5x at 20, reducing single-file dominance. Flask moved to C (0.69) with risk 0.35 — directionally correct but modest improvement. The grade remains C because the signal sub-score (0.88) and structure (0.95) are the actual limiting factors, not just the risk formula.
 
-### 5. Parser failures (PARTIALLY ADDRESSED)
+### 5. Parser failures (RESOLVED except rust)
 
-| Repo | Cause | Round 5a | Round 5b | Status |
-|------|-------|----------|----------|--------|
-| spring-boot | Stack overflow in Ruby parser | FAIL | FAIL | `compute_complexity` fixed (iterative), but `walk_node` itself is also recursive and still crashes |
-| rust | Stack overflow on 58K+ files | FAIL | FAIL | Known LIMITATION — needs stack limit or chunked parsing |
-| rails | Stack overflow in Ruby parser | FAIL | FAIL | Same `walk_node` recursion as spring-boot |
-| php-src | PHP parser produces 0 nodes | FAIL | FAIL | `walk_node` catch-all widened, `compute_complexity` made iterative, but root cause is likely tree-sitter grammar-level (C files in php-src not parsed as PHP) |
+| Repo | Cause | Round 5a | Round 5b | Round 5c | Status |
+|------|-------|----------|----------|----------|--------|
+| spring-boot | Stack overflow in Ruby parser | FAIL | FAIL | **A (0.85)** | **FIXED** — `walk_node` converted to iterative |
+| rust | Stack overflow on 58K+ files | FAIL | FAIL | not tested | Known LIMITATION — needs stack limit or chunked parsing |
+| rails | Stack overflow in Ruby parser | FAIL | FAIL | **A (0.93)** | **FIXED** — `walk_node` converted to iterative |
+| php-src | PHP parser produces 0 nodes | FAIL | FAIL | **A (0.90)** | **FIXED** — `walk_node` iterative + widened catch-all |
 
 **Fixed in Round 5b**:
 - Ruby/PHP `compute_complexity`: converted from recursive to iterative with explicit stack
 - PHP `walk_node` catch-all: widened to recurse into any container node (was limited to 3 types)
 
-**Remaining action items**:
-- Ruby/PHP `walk_node` needs iterative conversion (same recursion pattern as `compute_complexity`) — BUG
-- rust-lang/rust needs memory/stack limit handling for massive repos — LIMITATION
-- php-src needs grammar-level investigation — the repo is mostly C code, `.php` test files may have unusual structure — BUG
+**Fixed in Round 5c**:
+- Ruby/PHP/Kotlin/C++/C# `walk_node`: converted from recursive to iterative with explicit stack
+- This resolved all three remaining parser stack overflow failures (spring-boot, rails, php-src)
+
+**Remaining limitation**:
+- rust-lang/rust needs memory/stack limit handling for massive repos (58K+ files) — LIMITATION, not a parser bug
 
 ### 6. Go repos consistently penalized
 
@@ -229,13 +242,64 @@ The Go intra-package suppression fix (GAP-13) may not be fully effective, or Go'
 |---|---------------|--------|
 | 1 | Investigate TypeScript A grade: checker.ts should trigger god_module but likely doesn't due to function-level module splitting | OPEN |
 | 2 | Flask small-repo penalty: floor risk amplification when active_modules < 20 | **DONE** (Round 5b) — amplification scales 2x→5x, flask risk 0.32→0.35 |
-| 3 | Fix Ruby parser stack overflow: convert recursive walks to iterative | **PARTIAL** — `compute_complexity` fixed, `walk_node` still recursive |
-| 4 | Fix PHP parser: investigate why extract_nodes produces 0 nodes on php-src | **PARTIAL** — `walk_node` catch-all widened + iterative complexity, but php-src still fails |
+| 3 | Fix Ruby parser stack overflow: convert recursive walks to iterative | **DONE** (Round 5c) — both `compute_complexity` and `walk_node` now iterative |
+| 4 | Fix PHP parser: investigate why extract_nodes produces 0 nodes on php-src | **DONE** (Round 5c) — `walk_node` converted to iterative + catch-all widened; php-src now succeeds (A, 0.90) |
 | 5 | Review Go signal rates: compare per-module signal density between Go and Python repos | OPEN |
 | 6 | Absolute critical count caveat: emit when critical_count > 100 | **DONE** (Round 5b) — caveat now emitted in health index |
-| 7 | Convert Ruby `walk_node` to iterative (same recursion pattern as `compute_complexity`) | NEW — required to fix spring-boot/rails |
-| 8 | Convert PHP `walk_node` to iterative for consistency | NEW |
-| 9 | Investigate php-src at tree-sitter grammar level | NEW — likely C files misrouted or unusual PHP test structure |
+| 7 | Convert Ruby `walk_node` to iterative (same recursion pattern as `compute_complexity`) | **DONE** (Round 5c) — spring-boot now A (0.85), rails now A (0.93) |
+| 8 | Convert PHP `walk_node` to iterative for consistency | **DONE** (Round 5c) — php-src now A (0.90) |
+| 9 | Investigate php-src at tree-sitter grammar level | **RESOLVED** (Round 5c) — iterative `walk_node` + widened catch-all was sufficient; php-src now parses successfully |
+| 10 | Convert Kotlin/C++/C# `walk_node` to iterative (same pattern, proactive fix) | **DONE** (Round 5c) — all five parsers with recursive `walk_node` now iterative |
+
+## Results Table (Round 5c — 2026-04-01, after walk_node iterative conversion)
+
+Fixes applied:
+- Ruby/PHP/Kotlin/C++/C# `walk_node`: converted from recursive to iterative with explicit stack
+- This completes the stack overflow fix started in Round 5b (which only fixed `compute_complexity`)
+
+### Partial run (8 repos: 5 minimum validation set + 3 previously-failing)
+
+```
+Repository                Lang     Cat      Grade  Score   Total  Active   Risk   Sigs  Struc   #Sigs  Crit  High
+-----------------------------------------------------------------------------------------------------------------
+flask                     Python   baseline     C   0.69      83      16   0.35   0.88   0.95      56     1     0
+gin                       Go       baseline     B   0.80      98      40   0.64   0.85   1.00     138     1     1
+express                   JS/TS    baseline     A   0.85     142      17   0.64   1.00   1.00      18     1     0
+django-rest-framework     Python   prev         A   0.95     175      58   0.87   1.00   1.00     108     1     2
+fastapi                   Python   prev         A   0.93    1513    1309   0.92   0.92   0.96    1020    14    52
+spring-boot               Java     challngr     A   0.85    9108    9108   0.85   0.81   0.92   15613    92   364
+rails                     Ruby     challngr     A   0.93    3476     847   0.85   0.98   1.00     745     9    34
+php-src                   C        challngr     A   0.90    2393    2244   0.95   0.78   0.99   22438    23    90
+```
+
+### Round 5b → 5c Comparison
+
+| Repo | 5b Grade | 5c Grade | Score Delta | Key Change |
+|------|:--------:|:--------:|:-----------:|------------|
+| flask | C (0.69) | C (0.69) | 0 | No change (parser fix doesn't affect Python) |
+| gin | B (0.80) | B (0.80) | 0 | No change |
+| express | A (0.85) | A (0.85) | 0 | No change |
+| django-rest-framework | A (0.95) | A (0.95) | 0 | No change |
+| fastapi | A (0.93) | A (0.93) | 0 | No change |
+| spring-boot | FAIL | **A (0.85)** | — | **Fixed**: Ruby `walk_node` stack overflow resolved |
+| rails | FAIL | **A (0.93)** | — | **Fixed**: Ruby `walk_node` stack overflow resolved |
+| php-src | FAIL | **A (0.90)** | — | **Fixed**: PHP `walk_node` iterative + widened catch-all |
+
+**Conclusion**: The iterative `walk_node` conversion resolved all three parser stack overflow failures.
+Baseline repos are completely unchanged (parser changes only affect Ruby/PHP/Kotlin/C++/C# code paths).
+
+spring-boot (A, 0.85) is the first successful Java benchmark — 9,108 modules, 15,613 signals, 92 critical.
+The A grade may warrant scrutiny given the signal count, but this is consistent with the sqrt(N) normalization
+behavior seen in other large repos. rails (A, 0.93) and php-src (A, 0.90) are reasonable first benchmarks.
+
+### Remaining known issues
+
+| Issue | Status |
+|-------|--------|
+| rust-lang/rust: 58K+ files, memory exhaustion | LIMITATION — not a parser bug, needs chunked processing |
+| Odoo still gets A (known blind spot) | OPEN — SystemicComplexity signal insufficient |
+| TypeScript A (0.98) suspiciously high | OPEN — checker.ts god module not detected |
+| Go repos consistently penalized | OPEN — needs investigation |
 
 ## SOP: Routine Benchmark
 
