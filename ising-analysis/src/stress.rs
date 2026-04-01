@@ -682,11 +682,17 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         .filter(|n| n.risk_tier == RiskTier::High)
         .count();
 
-    // --- Median direct score across active modules ---
+    // --- Median and P75 direct score across active modules ---
     // We use MEDIAN instead of mean because mean is dominated by outliers.
     // In small repos (e.g., gin with 98 modules), one hot file inflates the mean
     // from ~0.05 to ~0.36. Median gives a representative "typical module" measure.
-    // For large repos, median ≈ mean so this doesn't regress.
+    //
+    // However, median alone is blind to tail behavior: large repos with thousands
+    // of low-churn modules always have a near-zero median, making risk_sub_score
+    // ≈ 1.0 regardless of how many high-risk modules exist. To fix this, we blend
+    // median with P75 (75th percentile), which captures upper-distribution risk.
+    // The 60/40 blend ensures repos with heavy tails (many hot modules) get
+    // penalized while repos with a single outlier aren't over-punished.
     let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
     let avg_direct_score = total_direct / active_modules as f64;
 
@@ -697,6 +703,9 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     } else {
         scores[scores.len() / 2]
     };
+    let p75_idx = ((scores.len() as f64 * 0.75).floor() as usize).min(scores.len() - 1);
+    let p75_direct_score = scores[p75_idx];
+    let representative_score = median_direct_score * 0.6 + p75_direct_score * 0.4;
 
     // --- Risk concentration ---
     scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -716,7 +725,7 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     let unstable_dep_density = signals.unstable_dep_count as f64 / total_f;
 
     // === Sub-score 1: Risk (40%) ===
-    // Use median direct score (robust to outliers) with amplification.
+    // Use blended median+P75 direct score (robust yet tail-sensitive) with amplification.
     // For very small samples (active_modules < 20), reduce the amplification factor
     // to prevent a single hot file from dominating (e.g., flask: 16 active modules,
     // one high-risk file pulls risk_sub_score from ~0.7 to 0.32).
@@ -727,9 +736,24 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     } else {
         5.0
     };
-    let base_health = 1.0 / (1.0 + median_direct_score * amplification);
+    let base_health = 1.0 / (1.0 + representative_score * amplification);
     let concentration_factor = 0.8 + 0.2 * risk_concentration;
-    let risk_sub_score = (base_health * concentration_factor).clamp(0.0, 1.0);
+
+    // Critical mass penalty: when the absolute number of high-risk modules (critical
+    // + high tier) is substantial, the repo has systemic risk that percentile-based
+    // metrics hide. We penalize proportionally to sqrt(critical+high)/sqrt(total),
+    // capped at 20%. This addresses the "268 critical modules in TypeScript = A"
+    // problem without affecting small repos.
+    let high_risk_count = (critical_count + high_count) as f64;
+    let critical_mass_penalty = if high_risk_count > 20.0 {
+        let ratio = high_risk_count.sqrt() / total_f.sqrt();
+        (ratio * 0.8).min(0.20)
+    } else {
+        0.0
+    };
+
+    let risk_sub_score =
+        (base_health * concentration_factor * (1.0 - critical_mass_penalty)).clamp(0.0, 1.0);
 
     // === Sub-score 2: Signals (35%) ===
     // Signal counts are normalized by sqrt(total_modules) instead of total_modules.

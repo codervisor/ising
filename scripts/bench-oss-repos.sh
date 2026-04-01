@@ -106,7 +106,6 @@ REPO_DEFS=(
   "spring-boot|https://github.com/spring-projects/spring-boot.git|Java|challenger|Java framework (may fail: Ruby parser stack overflow on embedded files)"
 
   # Rust
-  "rust|https://github.com/rust-lang/rust.git|Rust|challenger|Rust compiler (may fail: stack overflow on 58K+ files)"
   "deno|https://github.com/denoland/deno.git|Rust|challenger|Rust runtime"
 
   # AI/ML repos
