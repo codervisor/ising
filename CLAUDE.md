@@ -56,7 +56,7 @@ Composite score from three sub-scores (see `compute_health_index` in `stress.rs`
 
 | Sub-score | Weight | Input | Normalization |
 |-----------|--------|-------|---------------|
-| Risk | 0.40 | **Median** direct_score + concentration | 5x amplification |
+| Risk | 0.40 | **Median+P75 blend** (75/25) direct_score + concentration + critical mass penalty | 5x amplification, penalty capped at 15% |
 | Signals | 0.35 | God modules, cycles, bombs, fragile boundaries, systemic complexity | **sqrt(N)** normalization (systemic complexity: flat 2.5x, codebase-level) |
 | Structure | 0.25 | Cycle + unstable dep entanglement | **sqrt(N)** normalization |
 

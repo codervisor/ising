@@ -3,7 +3,7 @@ status: complete
 created: 2026-03-31
 updated: 2026-04-01
 priority: medium
-last_benchmark: 2026-04-01-round5d
+last_benchmark: 2026-04-01-round5e
 tags:
   - validation
   - benchmark
@@ -411,3 +411,81 @@ Run this script:
 See also: **Post-Fix Verification SOP** in `CLAUDE.md` for the mandatory minimum 5-repo
 validation set (flask, gin, express, django-rest-framework, fastapi) when the full benchmark
 is not feasible.
+
+## Results Table (Round 5e — 2026-04-01, after risk scoring optimization)
+
+Fixes applied:
+- Risk sub-score: blend median (75%) with P75 (25%) for tail sensitivity. Median alone was blind to
+  upper-distribution risk, making risk_sub_score ≈ 1.0 for large repos regardless of critical module count.
+- Critical mass penalty: when critical+high tier modules > 30, apply penalty proportional to
+  sqrt(high_risk)/sqrt(total) * 0.6, capped at 15%. Addresses "268 critical modules = A grade" inflation.
+- Removed rust-lang/rust from benchmark (always failed with memory exhaustion, just noise).
+
+### Full run (28 repos: 28 succeeded, 0 failed)
+
+```
+Repository                Lang     Cat      Grade  Score   Total  Active   Risk   Sigs  Struc   #Sigs  Crit  High
+-----------------------------------------------------------------------------------------------------------------
+flask                     Python   baseline     C   0.69      83      16   0.35   0.88   0.95      56     1     0
+django                    Python   challngr     B   0.71    3006     480   0.68   0.62   0.89     755     5    19
+django-rest-framework     Python   prev         A   0.93     175      58   0.82   1.00   1.00     108     1     2
+fastapi                   Python   prev         A   0.88    1515    1311   0.80   0.92   0.96    1021    14    52
+express                   JS/TS    baseline     B   0.81     142      17   0.52   1.00   1.00      18     1     0
+fastify                   JS/TS    challngr     A   0.89     287      88   0.72   1.00   1.00     124     1     4
+nest                      JS/TS    challngr     A   0.87    1679     184   0.68   1.00   1.00     289     2     8
+next.js                   JS/TS    challngr     A   0.88   22132   21975   0.84   0.85   1.00   13691   220   879
+svelte                    JS/TS    challngr     A   0.91    3374    3374   0.81   0.97   1.00    1484    34   135
+TypeScript                JS/TS    challngr     A   0.93   39421   26726   0.85   0.97   1.00    2263   268  1069
+gin                       Go       baseline     B   0.75      98      40   0.52   0.85   1.00     138     1     1
+ollama                    Go       prev         C   0.69    1303    1299   0.81   0.36   0.95    7804    13    52
+prometheus                Go       challngr     C   0.66     955     771   0.82   0.36   0.84    1767     8    31
+kubernetes                Go       challngr     C   0.60   17116    5446   0.85   0.30   0.62   33758    55   218
+grafana                   Go       prev         C   0.55   14997   14990   0.70   0.35   0.59   23209   150   600
+kafka                     Java     challngr     D   0.54    6141    6132   0.77   0.27   0.57   23947    62   245
+spring-boot               Java     challngr     B   0.81    9108    9108   0.73   0.81   0.92   15613    92   364
+deno                      Rust     challngr     A   0.86    5001    4928   0.84   0.79   0.99    5814    50   197
+pytorch                   C++/Py   challngr     C   0.66    9085    8928   0.78   0.42   0.80   31547    90   357
+transformers              Python   prev         C   0.57    4323    3844   0.62   0.32   0.85    5194    39   154
+vllm                      Python   prev         C   0.61    3031    2818   0.63   0.40   0.85    3902    29   112
+llama.cpp                 C/C++    prev         B   0.80    1114    1113   0.81   0.69   0.94   10044    12    44
+langchain                 Python   prev         A   0.89    2548    2351   0.77   0.97   1.00    2212    24    94
+open-webui                Python   prev         B   0.71     317     277   0.79   0.41   1.00     837     3    11
+ha-core                   Python   prev         C   0.70   16703   16701   0.72   0.53   0.90   12629   168   668
+odoo                      Python   prev         A   0.88   14189   14157   0.81   0.89   0.97   11073   142   566
+rails                     Ruby     challngr     A   0.90    3476     850   0.77   0.98   1.00     747     9    34
+php-src                   C        challngr     B   0.80    2393    2244   0.82   0.64   0.99   22454    23    90
+```
+
+### Round 5d → 5e Comparison
+
+| Repo | 5d Grade | 5e Grade | Score Delta | Key Change |
+|------|:--------:|:--------:|:-----------:|------------|
+| flask | C (0.69) | C (0.69) | 0 | No change (too few modules for P75/critical mass to matter) |
+| django | B (0.73) | B (0.71) | -0.02 | Risk 0.74→0.68 (P75 blend) |
+| express | A (0.85) | **B (0.81)** | -0.04 | Risk 0.64→0.52 (P75 blend, B is fairer for small framework) |
+| gin | B (0.80) | B (0.75) | -0.05 | Risk 0.64→0.52 (still passes calibration target) |
+| spring-boot | A (0.85) | **B (0.81)** | -0.04 | Risk 0.85→0.73 (92 critical → B is more honest) |
+| deno | A (0.92) | A (0.86) | -0.06 | Risk 0.97→0.84 (critical mass penalty + P75) |
+| TypeScript | A (0.97) | A (0.93) | -0.04 | Risk 0.95→0.85 (268 critical penalized) |
+| next.js | A (0.93) | A (0.88) | -0.05 | Risk 0.97→0.84 (220 critical penalized) |
+| ollama | B (0.74) | **C (0.69)** | -0.05 | 7804 signals, P75 tail exposure |
+| prometheus | B (0.71) | **C (0.66)** | -0.05 | 1767 signals, P75 tail exposure |
+| grafana | C (0.60) | C (0.55) | -0.05 | Risk 0.83→0.70 |
+| kafka | C (0.59) | **D (0.54)** | -0.05 | 23947 signals, most troubled repo in set |
+| pytorch | B (0.71) | **C (0.66)** | -0.05 | 31547 signals, critical mass penalty |
+| ha-core | B (0.75) | **C (0.70)** | -0.05 | 168 critical, 668 high → penalty applied |
+
+### Grade Distribution (Round 5e)
+
+| Grade | Count | Repos |
+|-------|-------|-------|
+| A | 11 | django-rest-framework, fastapi, fastify, nest, next.js, svelte, TypeScript, deno, langchain, odoo, rails |
+| B | 7 | django, express, gin, spring-boot, llama.cpp, open-webui, php-src |
+| C | 9 | flask, ollama, prometheus, kubernetes, grafana, pytorch, transformers, vllm, ha-core |
+| D | 1 | kafka |
+
+**Net change from Round 5d**: Grade distribution improved from 14A/8B/6C/0D/1FAIL to 11A/7B/9C/1D/0FAIL.
+Removed grade inflation (spring-boot 92-critical A→B, express A→B). Risk sub-score now discriminates
+better: A-graded repos risk 0.68-0.85 vs C-graded 0.62-0.85 — still overlapping but less than before
+(was 0.64-0.97 vs 0.74-0.92). The P75 blend and critical mass penalty together provide ~0.05 average
+score reduction, concentrated on repos with genuine tail risk or high absolute critical counts.

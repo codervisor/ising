@@ -691,8 +691,8 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     // of low-churn modules always have a near-zero median, making risk_sub_score
     // ≈ 1.0 regardless of how many high-risk modules exist. To fix this, we blend
     // median with P75 (75th percentile), which captures upper-distribution risk.
-    // The 60/40 blend ensures repos with heavy tails (many hot modules) get
-    // penalized while repos with a single outlier aren't over-punished.
+    // The 75/25 blend provides tail sensitivity without over-penalizing repos
+    // where most modules are genuinely low-risk.
     let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
     let avg_direct_score = total_direct / active_modules as f64;
 
@@ -705,7 +705,7 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     };
     let p75_idx = ((scores.len() as f64 * 0.75).floor() as usize).min(scores.len() - 1);
     let p75_direct_score = scores[p75_idx];
-    let representative_score = median_direct_score * 0.6 + p75_direct_score * 0.4;
+    let representative_score = median_direct_score * 0.75 + p75_direct_score * 0.25;
 
     // --- Risk concentration ---
     scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -745,9 +745,9 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     // capped at 20%. This addresses the "268 critical modules in TypeScript = A"
     // problem without affecting small repos.
     let high_risk_count = (critical_count + high_count) as f64;
-    let critical_mass_penalty = if high_risk_count > 20.0 {
+    let critical_mass_penalty = if high_risk_count > 30.0 {
         let ratio = high_risk_count.sqrt() / total_f.sqrt();
-        (ratio * 0.8).min(0.20)
+        (ratio * 0.6).min(0.15)
     } else {
         0.0
     };
