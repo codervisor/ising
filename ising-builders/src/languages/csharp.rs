@@ -14,7 +14,8 @@ pub fn extract_nodes(
     walk_node(node, source, functions, classes, imports);
 }
 
-/// Recursively walk the C# AST to find declarations at any nesting level.
+/// Iterative AST walk using an explicit stack to avoid stack overflow
+/// on deeply nested C# ASTs.
 fn walk_node(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -22,65 +23,47 @@ fn walk_node(
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "class_declaration"
-            | "interface_declaration"
-            | "struct_declaration"
-            | "enum_declaration"
-            | "record_declaration"
-            | "record_struct_declaration" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child);
-                    let deprecated = has_obsolete_attribute(child, source);
-                    classes.push(ClassInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        deprecated,
-                    });
+    let mut stack: Vec<tree_sitter::Node<'_>> = vec![node];
+
+    while let Some(current) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            match child.kind() {
+                "class_declaration"
+                | "interface_declaration"
+                | "struct_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "record_struct_declaration" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let complexity = compute_complexity(child);
+                        let deprecated = has_obsolete_attribute(child, source);
+                        classes.push(ClassInfo {
+                            name,
+                            line_start: child.start_position().row as u32 + 1,
+                            line_end: child.end_position().row as u32 + 1,
+                            complexity,
+                            deprecated,
+                        });
+                    }
+                    // Push type body for iterative processing
+                    stack.push(child);
                 }
-                // Recurse into type body for methods
-                walk_node(child, source, functions, classes, imports);
-            }
-            "method_declaration"
-            | "constructor_declaration"
-            | "destructor_declaration"
-            | "operator_declaration"
-            | "conversion_operator_declaration" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child);
-                    let deprecated = has_obsolete_attribute(child, source);
-                    let calls = extract_calls(child, source);
-                    functions.push(FunctionInfo {
-                        name,
-                        line_start: child.start_position().row as u32 + 1,
-                        line_end: child.end_position().row as u32 + 1,
-                        complexity,
-                        calls,
-                        deprecated,
-                    });
-                }
-            }
-            "property_declaration" => {
-                // Properties with accessors can have significant logic
-                if let Some(name_node) = child.child_by_field_name("name") {
-                    let name = name_node
-                        .utf8_text(source.as_bytes())
-                        .unwrap_or("")
-                        .to_string();
-                    let complexity = compute_complexity(child);
-                    if complexity > 1 {
+                "method_declaration"
+                | "constructor_declaration"
+                | "destructor_declaration"
+                | "operator_declaration"
+                | "conversion_operator_declaration" => {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let complexity = compute_complexity(child);
                         let deprecated = has_obsolete_attribute(child, source);
                         let calls = extract_calls(child, source);
                         functions.push(FunctionInfo {
@@ -93,18 +76,40 @@ fn walk_node(
                         });
                     }
                 }
+                "property_declaration" => {
+                    // Properties with accessors can have significant logic
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        let name = name_node
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .to_string();
+                        let complexity = compute_complexity(child);
+                        if complexity > 1 {
+                            let deprecated = has_obsolete_attribute(child, source);
+                            let calls = extract_calls(child, source);
+                            functions.push(FunctionInfo {
+                                name,
+                                line_start: child.start_position().row as u32 + 1,
+                                line_end: child.end_position().row as u32 + 1,
+                                complexity,
+                                calls,
+                                deprecated,
+                            });
+                        }
+                    }
+                }
+                "using_directive" => {
+                    extract_using(child, source, imports);
+                }
+                "namespace_declaration" | "file_scoped_namespace_declaration" => {
+                    // Push namespace for iterative processing
+                    stack.push(child);
+                }
+                "global_statement" => {
+                    stack.push(child);
+                }
+                _ => {}
             }
-            "using_directive" => {
-                extract_using(child, source, imports);
-            }
-            "namespace_declaration" | "file_scoped_namespace_declaration" => {
-                // Recurse into namespace body
-                walk_node(child, source, functions, classes, imports);
-            }
-            "global_statement" => {
-                walk_node(child, source, functions, classes, imports);
-            }
-            _ => {}
         }
     }
 }

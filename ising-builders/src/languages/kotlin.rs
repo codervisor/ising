@@ -14,6 +14,8 @@ pub fn extract_nodes(
     walk_node(node, source, None, functions, classes, imports);
 }
 
+/// Iterative AST walk using an explicit stack to avoid stack overflow
+/// on deeply nested Kotlin ASTs.
 fn walk_node(
     node: tree_sitter::Node<'_>,
     source: &str,
@@ -22,32 +24,38 @@ fn walk_node(
     classes: &mut Vec<ClassInfo>,
     imports: &mut Vec<ImportInfo>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "class_declaration" | "object_declaration" | "interface_declaration" => {
-                extract_class(child, source, functions, classes, imports);
-            }
-            "function_declaration" => {
-                extract_function(child, source, current_class, functions);
-            }
-            "import_header" | "import_list" => {
-                extract_import(child, source, imports);
-            }
-            _ => {
-                // Recurse into package/file-level containers
-                walk_node(child, source, current_class, functions, classes, imports);
+    // Stack of (node_to_iterate_children_of, current_class_context)
+    let mut stack: Vec<(tree_sitter::Node<'_>, Option<String>)> =
+        vec![(node, current_class.map(|s| s.to_string()))];
+
+    while let Some((current, cls_ctx)) = stack.pop() {
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            match child.kind() {
+                "class_declaration" | "object_declaration" | "interface_declaration" => {
+                    extract_class_iterative(child, source, &mut stack, classes);
+                }
+                "function_declaration" => {
+                    extract_function(child, source, cls_ctx.as_deref(), functions);
+                }
+                "import_header" | "import_list" => {
+                    extract_import(child, source, imports);
+                }
+                _ => {
+                    // Push container nodes for iterative processing
+                    stack.push((child, cls_ctx.clone()));
+                }
             }
         }
     }
 }
 
-fn extract_class(
-    node: tree_sitter::Node<'_>,
+/// Extract class info and push body onto the iterative walk stack.
+fn extract_class_iterative<'a>(
+    node: tree_sitter::Node<'a>,
     source: &str,
-    functions: &mut Vec<FunctionInfo>,
+    stack: &mut Vec<(tree_sitter::Node<'a>, Option<String>)>,
     classes: &mut Vec<ClassInfo>,
-    imports: &mut Vec<ImportInfo>,
 ) {
     let name = node
         .child_by_field_name("name")
@@ -74,15 +82,15 @@ fn extract_class(
         deprecated: false,
     });
 
-    // Recurse into class body for methods
+    // Push class body onto stack with class context
     if let Some(body) = node.child_by_field_name("body") {
-        walk_node(body, source, Some(&name), functions, classes, imports);
+        stack.push((body, Some(name)));
     } else {
         // Try to find class_body child directly
         let mut c = node.walk();
         for ch in node.children(&mut c) {
             if ch.kind() == "class_body" || ch.kind() == "enum_class_body" {
-                walk_node(ch, source, Some(&name), functions, classes, imports);
+                stack.push((ch, Some(name.clone())));
             }
         }
     }
