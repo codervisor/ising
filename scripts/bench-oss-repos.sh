@@ -14,7 +14,7 @@
 #   ./scripts/bench-oss-repos.sh [--clone] [--output DIR] [--repos-dir DIR] [--since "TIME"]
 #
 # OPTIONS:
-#   --clone       Clone repos before analysis (default: skip if present)
+#   --clone       Show status for already-cloned repos (repos are always auto-cloned if missing)
 #   --output      Output directory for results (default: /tmp/oss-bench-results)
 #   --repos-dir   Directory where OSS repos are stored (default: /tmp/oss-repos)
 #   --since       Git history window for analysis (default: "6 months ago")
@@ -127,26 +127,31 @@ REPO_DEFS=(
 )
 
 # =============================================================================
-# Clone repos if requested
+# Clone missing repos automatically
 # =============================================================================
-if [ "$CLONE" = true ]; then
-  echo "=== Cloning repositories ==="
-  mkdir -p "$REPOS_DIR"
+echo "=== Checking repositories ==="
+mkdir -p "$REPOS_DIR"
 
-  PIDS=()
-  for def in "${REPO_DEFS[@]}"; do
-    IFS='|' read -r name url lang category notes <<< "$def"
-    REPO_PATH="$REPOS_DIR/$name"
+PIDS=()
+CLONE_NEEDED=0
+for def in "${REPO_DEFS[@]}"; do
+  IFS='|' read -r name url lang category notes <<< "$def"
+  REPO_PATH="$REPOS_DIR/$name"
 
-    if [ -d "$REPO_PATH" ]; then
-      echo "  SKIP (exists): $name"
-    else
-      echo "  CLONE: $name"
-      git clone --depth=500 "$url" "$REPO_PATH" 2>/dev/null &
-      PIDS+=($!)
+  if [ -d "$REPO_PATH" ]; then
+    if [ "$CLONE" = true ]; then
+      echo "  EXISTS: $name"
     fi
-  done
+  else
+    echo "  CLONE: $name"
+    git clone --depth=500 "$url" "$REPO_PATH" 2>/dev/null &
+    PIDS+=($!)
+    CLONE_NEEDED=$((CLONE_NEEDED + 1))
+  fi
+done
 
+if [ "$CLONE_NEEDED" -gt 0 ]; then
+  echo "  Waiting for $CLONE_NEEDED clone(s)..."
   CLONE_FAIL=0
   for pid in "${PIDS[@]}"; do
     if ! wait "$pid"; then
@@ -157,8 +162,10 @@ if [ "$CLONE" = true ]; then
     echo "  WARNING: $CLONE_FAIL clone(s) failed"
   fi
   echo "  Done cloning."
-  echo ""
+else
+  echo "  All repos present."
 fi
+echo ""
 
 # =============================================================================
 # Run analysis
@@ -188,6 +195,7 @@ for def in "${REPO_DEFS[@]}"; do
 
   if [ ! -d "$REPO_PATH" ]; then
     echo "  SKIP: $name (not cloned)"
+    echo '{"status":"skip"}' > "$JSON_DIR/${name}_health.json"
     SKIP=$((SKIP + 1))
     continue
   fi
@@ -246,6 +254,10 @@ for defn in repo_defs:
     try:
         with open(health_file) as f:
             h = json.load(f)
+
+        if h.get("status") == "skip":
+            results.append({"name": name, "lang": lang, "category": category, "grade": "SKIP"})
+            continue
         sig_count = 0
         if os.path.exists(stats_file):
             with open(stats_file) as f:
@@ -272,7 +284,7 @@ print(hdr)
 print("-" * len(hdr))
 
 for r in results:
-    if r["grade"] in ("FAIL", "ERR"):
+    if r["grade"] in ("FAIL", "ERR", "SKIP"):
         print(f"{r['name']:<25} {r['lang']:<8} {r['category']:<8} {r['grade']:>5}")
     else:
         print(f"{r['name']:<25} {r['lang']:<8} {r['category']:<8} {r['grade']:>5} {r['score']:>6.2f} {r['total']:>7} {r['active']:>7} {r['risk']:>6.2f} {r['signals']:>6.2f} {r['structure']:>6.2f} {r['sig_count']:>7} {r['critical']:>5} {r['high']:>5}")
@@ -281,17 +293,17 @@ for r in results:
 print()
 print("=== Calibration Checks ===")
 gin = next((r for r in results if r["name"] == "gin"), None)
-if gin and gin["grade"] != "FAIL":
+if gin and gin["grade"] not in ("FAIL", "SKIP"):
     status = "PASS" if gin["grade"] in ("A", "B") else "FAIL"
     print(f"  [{status}] gin >= B: got {gin['grade']} ({gin['score']:.2f})")
 
 odoo = next((r for r in results if r["name"] == "odoo"), None)
-if odoo and odoo["grade"] != "FAIL":
+if odoo and odoo["grade"] not in ("FAIL", "SKIP"):
     status = "WARN" if odoo["grade"] == "A" else "PASS"
     print(f"  [{status}] odoo != A (known blind spot): got {odoo['grade']} ({odoo['score']:.2f})")
 
 ts = next((r for r in results if r["name"] == "TypeScript"), None)
-if ts and ts["grade"] != "FAIL":
+if ts and ts["grade"] not in ("FAIL", "SKIP"):
     status = "WARN" if ts["grade"] == "A" and ts["score"] > 0.95 else "OK"
     print(f"  [{status}] TypeScript sanity: got {ts['grade']} ({ts['score']:.2f}) - {ts['total']} modules")
 
@@ -300,7 +312,7 @@ print()
 print("=== Grade Distribution ===")
 from collections import Counter
 grades = Counter(r["grade"] for r in results)
-for g in ["A", "B", "C", "D", "F", "FAIL", "ERR"]:
+for g in ["A", "B", "C", "D", "F", "FAIL", "SKIP", "ERR"]:
     if g in grades:
         names = [r["name"] for r in results if r["grade"] == g]
         print(f"  {g}: {grades[g]}  ({', '.join(names)})")

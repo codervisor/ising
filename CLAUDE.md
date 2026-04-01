@@ -162,7 +162,7 @@ After fixing bugs in parsers, the risk model, health index, or signal detection:
 
 2. **Run the OSS benchmark** to check for regressions and verify the fix's impact:
    ```bash
-   ./scripts/bench-oss-repos.sh   # Requires repos already cloned with --clone
+   ./scripts/bench-oss-repos.sh   # Auto-clones missing repos
    ```
    - If the full 29-repo benchmark is not feasible, run at minimum these 5 repos manually:
      **flask** (small-repo bias), **gin** (Go calibration target, must be >= B),
