@@ -385,9 +385,12 @@ impl Database {
                 "INSERT OR REPLACE INTO health_index
                  (id, score, grade, active_modules, total_modules,
                   critical_count, high_count, risk_concentration, avg_direct_score,
+                  frac_stable, frac_healthy, frac_warning, frac_danger, frac_critical,
+                  lambda_max,
                   signal_density, god_module_density, cycle_density, unstable_dep_density,
+                  zone_sub_score, coupling_modifier, signal_penalty,
                   risk_sub_score, signal_sub_score, structural_sub_score, caveats)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     health.score,
                     health.grade,
@@ -397,10 +400,19 @@ impl Database {
                     health.high_count,
                     health.risk_concentration,
                     health.avg_direct_score,
+                    health.frac_stable,
+                    health.frac_healthy,
+                    health.frac_warning,
+                    health.frac_danger,
+                    health.frac_critical,
+                    health.lambda_max,
                     health.signal_density,
                     health.god_module_density,
                     health.cycle_density,
                     health.unstable_dep_density,
+                    health.zone_sub_score,
+                    health.coupling_modifier,
+                    health.signal_penalty,
                     health.risk_sub_score,
                     health.signal_sub_score,
                     health.structural_sub_score,
@@ -466,12 +478,15 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT score, grade, active_modules, total_modules,
                     critical_count, high_count, risk_concentration, avg_direct_score,
+                    frac_stable, frac_healthy, frac_warning, frac_danger, frac_critical,
+                    lambda_max,
                     signal_density, god_module_density, cycle_density, unstable_dep_density,
+                    zone_sub_score, coupling_modifier, signal_penalty,
                     risk_sub_score, signal_sub_score, structural_sub_score, caveats
              FROM health_index WHERE id = 1",
         )?;
         let mut rows = stmt.query_map([], |row| {
-            let caveats_str: String = row.get::<_, String>(15).unwrap_or_default();
+            let caveats_str: String = row.get::<_, String>(24).unwrap_or_default();
             let caveats: Vec<String> = serde_json::from_str(&caveats_str).unwrap_or_default();
             Ok(crate::StoredHealth {
                 score: row.get(0)?,
@@ -482,13 +497,22 @@ impl Database {
                 high_count: row.get::<_, i64>(5)? as usize,
                 risk_concentration: row.get(6)?,
                 avg_direct_score: row.get(7)?,
-                signal_density: row.get(8)?,
-                god_module_density: row.get(9)?,
-                cycle_density: row.get(10)?,
-                unstable_dep_density: row.get(11)?,
-                risk_sub_score: row.get(12)?,
-                signal_sub_score: row.get(13)?,
-                structural_sub_score: row.get(14)?,
+                frac_stable: row.get(8)?,
+                frac_healthy: row.get(9)?,
+                frac_warning: row.get(10)?,
+                frac_danger: row.get(11)?,
+                frac_critical: row.get(12)?,
+                lambda_max: row.get(13)?,
+                signal_density: row.get(14)?,
+                god_module_density: row.get(15)?,
+                cycle_density: row.get(16)?,
+                unstable_dep_density: row.get(17)?,
+                zone_sub_score: row.get(18)?,
+                coupling_modifier: row.get(19)?,
+                signal_penalty: row.get(20)?,
+                risk_sub_score: row.get(21)?,
+                signal_sub_score: row.get(22)?,
+                structural_sub_score: row.get(23)?,
                 caveats,
             })
         })?;

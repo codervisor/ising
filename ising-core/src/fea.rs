@@ -138,14 +138,14 @@ pub struct RiskField {
 
 /// Aggregate health index for a repository.
 ///
-/// A composite score derived from three sub-scores:
-/// 1. **Risk sub-score** — avg direct risk + concentration (the original formula, amplified)
-/// 2. **Signal sub-score** — density of architectural signals (god modules, cycles, etc.)
-/// 3. **Structural sub-score** — entanglement from cycles + unstable dependencies
+/// Scoring is based on three components:
+/// 1. **Zone score** — weighted fraction of modules in each safety zone (primary driver)
+/// 2. **Coupling modifier** — λ_max from structural Import graph amplifies/dampens zone impact
+/// 3. **Signal penalty** — architectural signals (god modules, cycles, etc.) as a modifier
 ///
-/// Decomposing into sub-scores prevents bias by making it transparent what drives
-/// the grade. Users can see whether a low grade comes from change risk, architectural
-/// signals, or structural entanglement.
+/// The zone score directly measures what fraction of the codebase is in good shape.
+/// λ_max determines whether bad zones matter (coupled: failures cascade) or are contained
+/// (modular: failures stay local).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthIndex {
     /// Overall health score [0.0, 1.0]. Higher = healthier.
@@ -166,6 +166,29 @@ pub struct HealthIndex {
     /// Average direct score across active modules.
     pub avg_direct_score: f64,
 
+    // --- Zone fractions (fraction of active modules in each safety zone) ---
+    /// Fraction of active modules in Stable zone (SF > 3.0).
+    #[serde(default)]
+    pub frac_stable: f64,
+    /// Fraction of active modules in Healthy zone (SF 2.0-3.0).
+    #[serde(default)]
+    pub frac_healthy: f64,
+    /// Fraction of active modules in Warning zone (SF 1.5-2.0).
+    #[serde(default)]
+    pub frac_warning: f64,
+    /// Fraction of active modules in Danger zone (SF 1.0-1.5).
+    #[serde(default)]
+    pub frac_danger: f64,
+    /// Fraction of active modules in Critical zone (SF < 1.0).
+    #[serde(default)]
+    pub frac_critical: f64,
+
+    // --- Spectral coupling ---
+    /// Spectral radius of structural Import graph (unit weights).
+    /// λ < 1.0 = modular (failures local), λ ≥ 1.0 = coupled (failures cascade).
+    #[serde(default)]
+    pub lambda_max: f64,
+
     // --- Signal density metrics (per-module, for cross-repo comparability) ---
     /// Total signals / total_modules. Higher = more architectural issues per module.
     #[serde(default)]
@@ -181,6 +204,17 @@ pub struct HealthIndex {
     pub unstable_dep_density: f64,
 
     // --- Sub-scores for transparency [0.0, 1.0] each ---
+    /// Zone-based score: weighted average of zone fractions.
+    #[serde(default)]
+    pub zone_sub_score: f64,
+    /// Coupling modifier applied to zone score based on λ_max.
+    #[serde(default)]
+    pub coupling_modifier: f64,
+    /// Signal penalty: reduction from architectural signals.
+    #[serde(default)]
+    pub signal_penalty: f64,
+
+    // --- Legacy sub-scores (kept for backward compatibility) ---
     /// From avg_direct_score + concentration. Measures change-risk pressure.
     #[serde(default)]
     pub risk_sub_score: f64,
