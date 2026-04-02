@@ -1,9 +1,10 @@
 //! Node and graph-level metric computation.
 
-use crate::graph::{Edge, EdgeLayer, UnifiedGraph};
+use crate::graph::{Edge, EdgeLayer, EdgeType, UnifiedGraph};
 use petgraph::Direction;
 use petgraph::graph::EdgeReference;
 use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
 
 /// Computed structural metrics for a node.
 #[derive(Debug, Clone, Default)]
@@ -113,6 +114,181 @@ pub fn compute_graph_metrics(graph: &UnifiedGraph) -> GraphMetrics {
     }
 }
 
+/// Spectral metrics for the coupling graph.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpectralMetrics {
+    /// Maximum eigenvalue of the coupling adjacency matrix.
+    /// λ < 1.0 = perturbations decay (stable), λ ≥ 1.0 = perturbations cascade (critical).
+    pub lambda_max: f64,
+    /// Eigenvector centrality: for each node, its component in the dominant eigenvector.
+    /// Higher = more responsible for driving propagation.
+    pub eigenvector_centrality: HashMap<String, f64>,
+    /// Number of power iteration steps to convergence.
+    pub iterations: usize,
+    /// Whether power iteration converged within max_iterations.
+    pub converged: bool,
+}
+
+/// Compute spectral metrics (λ_max and eigenvector centrality) for the coupling graph.
+///
+/// Uses power iteration on the combined adjacency matrix (structural + co-change edges,
+/// weighted by damping factors matching the propagation model). The adjacency is treated
+/// as undirected (bidirectional) since risk propagation flows both ways.
+///
+/// Power iteration works because the adjacency matrix of a coupling graph is non-negative,
+/// and by the Perron-Frobenius theorem, the dominant eigenvalue is real and positive with
+/// a non-negative eigenvector.
+///
+/// # Arguments
+/// * `graph` - The unified graph
+/// * `structural_damping` - Weight factor for Import edges (default: 0.15)
+/// * `cochange_damping` - Weight factor for CoChange edges (default: 0.30)
+///
+/// # Performance
+/// O(edges × iterations) — typically 20-50 iterations for convergence.
+/// For a 40K-node graph with 500K edges, this is ~10M operations.
+pub fn compute_spectral_metrics(
+    graph: &UnifiedGraph,
+    structural_damping: f64,
+    cochange_damping: f64,
+) -> SpectralMetrics {
+    const MAX_ITER: usize = 200;
+    const EPSILON: f64 = 1e-6;
+
+    // Build adjacency list with combined weights (bidirectional).
+    // We index by dense integer IDs for performance, mapping back to string IDs at the end.
+    let node_ids: Vec<&str> = graph.node_ids().collect();
+    let n = node_ids.len();
+
+    if n == 0 {
+        return SpectralMetrics {
+            lambda_max: 0.0,
+            eigenvector_centrality: HashMap::new(),
+            iterations: 0,
+            converged: true,
+        };
+    }
+
+    // Map string IDs to dense indices
+    let id_to_idx: HashMap<&str, usize> =
+        node_ids.iter().enumerate().map(|(i, &s)| (s, i)).collect();
+
+    // Build sparse adjacency: Vec<Vec<(neighbor_idx, weight)>>
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+
+    // Add structural (Imports) edges — bidirectional
+    let import_edges = graph.edges_of_type(&EdgeType::Imports);
+    for &(src, tgt, weight) in &import_edges {
+        if let (Some(&si), Some(&ti)) = (id_to_idx.get(src), id_to_idx.get(tgt)) {
+            let w = weight * structural_damping;
+            adj[si].push((ti, w));
+            adj[ti].push((si, w));
+        }
+    }
+
+    // Add co-change edges — bidirectional
+    let cochange_edges = graph.edges_of_type(&EdgeType::CoChanges);
+    for &(src, tgt, weight) in &cochange_edges {
+        if let (Some(&si), Some(&ti)) = (id_to_idx.get(src), id_to_idx.get(tgt)) {
+            let w = weight * cochange_damping;
+            adj[si].push((ti, w));
+            adj[ti].push((si, w));
+        }
+    }
+
+    // Power iteration: v_{k+1} = A * v_k / ||A * v_k||
+    // λ_max ≈ ||A * v_k|| / ||v_k|| (Rayleigh quotient for dominant eigenvalue)
+    //
+    // Note: For graphs where λ_max = -λ_min (e.g., bipartite/star graphs), the
+    // eigenvector oscillates even after lambda converges. We fix this by tracking
+    // the pre-normalization vector w = A*v and using |w| for eigenvector centrality.
+    let mut v: Vec<f64> = vec![1.0 / (n as f64).sqrt(); n];
+    let mut w_final: Vec<f64> = vec![0.0; n];
+    let mut lambda_max = 0.0_f64;
+    let mut converged = false;
+    let mut iterations = 0;
+
+    for iter in 0..MAX_ITER {
+        iterations = iter + 1;
+
+        // Compute w = A * v
+        let mut w: Vec<f64> = vec![0.0; n];
+        for (i, neighbors) in adj.iter().enumerate() {
+            for &(j, weight) in neighbors {
+                w[i] += weight * v[j];
+            }
+        }
+
+        // Compute norm = ||w||
+        let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if norm < 1e-15 {
+            // Graph is disconnected or has no edges — λ = 0
+            lambda_max = 0.0;
+            converged = true;
+            break;
+        }
+
+        // λ_max estimate = ||w|| (since ||v|| = 1 after normalization)
+        let new_lambda = norm;
+
+        // Keep the raw w for eigenvector extraction
+        w_final.clone_from(&w);
+
+        // Normalize: v = w / ||w||
+        let inv_norm = 1.0 / norm;
+        for i in 0..n {
+            v[i] = w[i] * inv_norm;
+        }
+
+        // Check convergence
+        if (new_lambda - lambda_max).abs() < EPSILON {
+            lambda_max = new_lambda;
+            converged = true;
+            break;
+        }
+        lambda_max = new_lambda;
+    }
+
+    // After lambda convergence, do one final A*v to get a stable eigenvector direction.
+    // For graphs with symmetric spectrum (λ = -λ), the vector oscillates but A*v always
+    // points toward the Perron-Frobenius eigenvector (all non-negative).
+    // Use absolute values to handle any residual sign oscillation.
+    {
+        let mut w: Vec<f64> = vec![0.0; n];
+        for (i, neighbors) in adj.iter().enumerate() {
+            for &(j, weight) in neighbors {
+                w[i] += weight * v[j];
+            }
+        }
+        w_final = w;
+    }
+
+    // Build eigenvector centrality map (normalize to [0, 1])
+    // Use |w_final| to handle oscillation in bipartite-like graphs.
+    let max_w = w_final
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
+    let eigenvector_centrality: HashMap<String, f64> = if max_w > 1e-15 {
+        node_ids
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| w_final[i].abs() > 1e-10) // skip near-zero entries for sparsity
+            .map(|(i, &id)| (id.to_string(), w_final[i].abs() / max_w))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    SpectralMetrics {
+        lambda_max,
+        eigenvector_centrality,
+        iterations,
+        converged,
+    }
+}
+
 /// Compute the Nth percentile of a sorted slice of f64 values.
 pub fn percentile(values: &mut [f64], p: u32) -> f64 {
     if values.is_empty() {
@@ -198,5 +374,159 @@ mod tests {
 
         let metrics = compute_graph_metrics(&g);
         assert_eq!(metrics.cycle_count, 1);
+    }
+
+    #[test]
+    fn test_spectral_empty_graph() {
+        let g = UnifiedGraph::new();
+        let sm = compute_spectral_metrics(&g, 0.15, 0.30);
+        assert_eq!(sm.lambda_max, 0.0);
+        assert!(sm.converged);
+    }
+
+    #[test]
+    fn test_spectral_isolated_nodes() {
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a", "a.py"));
+        g.add_node(Node::module("b", "b.py"));
+        // No edges
+        let sm = compute_spectral_metrics(&g, 0.15, 0.30);
+        assert_eq!(sm.lambda_max, 0.0);
+        assert!(sm.converged);
+    }
+
+    #[test]
+    fn test_spectral_chain_graph() {
+        // A→B→C chain (no cycles). With damping=1.0 and unit weights:
+        // Adjacency (undirected): A-B, B-C
+        // For a path of 3 nodes, λ_max = sqrt(2) ≈ 1.414
+        // With structural_damping=1.0: edges have weight 1.0
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a", "a.py"));
+        g.add_node(Node::module("b", "b.py"));
+        g.add_node(Node::module("c", "c.py"));
+        g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("b", "c", EdgeType::Imports, 1.0).unwrap();
+
+        let sm = compute_spectral_metrics(&g, 1.0, 0.0);
+        // Path graph P_3 undirected: eigenvalues are {-sqrt(2), 0, sqrt(2)}
+        // λ_max = sqrt(2) ≈ 1.414
+        assert!(sm.converged);
+        assert!(
+            (sm.lambda_max - std::f64::consts::SQRT_2).abs() < 0.01,
+            "Expected λ≈1.414, got {}",
+            sm.lambda_max
+        );
+    }
+
+    #[test]
+    fn test_spectral_complete_graph() {
+        // K_4 (4 nodes, all connected). λ_max = 3 (N-1) for unit-weight undirected.
+        // With structural_damping=1.0: each edge has weight 1.0.
+        let mut g = UnifiedGraph::new();
+        let nodes = ["a", "b", "c", "d"];
+        for &n in &nodes {
+            g.add_node(Node::module(n, &format!("{n}.py")));
+        }
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                g.add_edge(nodes[i], nodes[j], EdgeType::Imports, 1.0)
+                    .unwrap();
+            }
+        }
+
+        let sm = compute_spectral_metrics(&g, 1.0, 0.0);
+        // K_4 undirected: λ_max = 3 (since we add bidirectional edges,
+        // each undirected edge becomes two directed edges with weight 1.0)
+        assert!(sm.converged);
+        assert!(
+            (sm.lambda_max - 3.0).abs() < 0.1,
+            "Expected λ≈3.0 for K_4, got {}",
+            sm.lambda_max
+        );
+    }
+
+    #[test]
+    fn test_spectral_damping_scales_lambda() {
+        // Same graph, different damping → λ should scale proportionally
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a", "a.py"));
+        g.add_node(Node::module("b", "b.py"));
+        g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
+
+        let sm_full = compute_spectral_metrics(&g, 1.0, 0.0);
+        let sm_half = compute_spectral_metrics(&g, 0.5, 0.0);
+
+        // For a single undirected edge (2 nodes), λ_max = weight
+        // With damping=1.0: λ = 1.0, with damping=0.5: λ = 0.5
+        assert!(sm_full.converged && sm_half.converged);
+        assert!(
+            (sm_full.lambda_max - 1.0).abs() < 0.01,
+            "Expected λ=1.0, got {}",
+            sm_full.lambda_max
+        );
+        assert!(
+            (sm_half.lambda_max - 0.5).abs() < 0.01,
+            "Expected λ=0.5, got {}",
+            sm_half.lambda_max
+        );
+    }
+
+    #[test]
+    fn test_spectral_cochange_edges() {
+        // Verify co-change edges contribute to λ
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a", "a.py"));
+        g.add_node(Node::module("b", "b.py"));
+        // Only co-change, no structural
+        g.add_edge("a", "b", EdgeType::CoChanges, 2.0).unwrap();
+
+        let sm = compute_spectral_metrics(&g, 0.0, 1.0);
+        // Single undirected edge weight 2.0 → λ = 2.0
+        assert!(sm.converged);
+        assert!(
+            (sm.lambda_max - 2.0).abs() < 0.01,
+            "Expected λ=2.0, got {}",
+            sm.lambda_max
+        );
+    }
+
+    #[test]
+    fn test_spectral_eigenvector_hub_node() {
+        // Star graph: A is hub, B/C/D are leaves. A→B, A→C, A→D
+        // Hub should have highest eigenvector centrality
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("hub", "hub.py"));
+        g.add_node(Node::module("leaf1", "leaf1.py"));
+        g.add_node(Node::module("leaf2", "leaf2.py"));
+        g.add_node(Node::module("leaf3", "leaf3.py"));
+        g.add_edge("hub", "leaf1", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("hub", "leaf2", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("hub", "leaf3", EdgeType::Imports, 1.0).unwrap();
+
+        let sm = compute_spectral_metrics(&g, 1.0, 0.0);
+        assert!(sm.converged);
+        // Hub should have centrality = 1.0 (normalized max)
+        let hub_c = sm.eigenvector_centrality.get("hub").copied().unwrap_or(0.0);
+        let leaf_c = sm
+            .eigenvector_centrality
+            .get("leaf1")
+            .copied()
+            .unwrap_or(0.0);
+        assert!(
+            (hub_c - 1.0).abs() < 0.01,
+            "Hub should have centrality 1.0, got {}",
+            hub_c
+        );
+        assert!(
+            leaf_c < hub_c,
+            "Leaf centrality ({leaf_c:.6}) should be less than hub ({hub_c:.6})"
+        );
+        // Star graph K_{1,3}: λ_max = sqrt(3) ≈ 1.732
+        assert!(
+            (sm.lambda_max - 3.0_f64.sqrt()).abs() < 0.05,
+            "Expected λ≈1.732 for star K_1,3, got {}",
+            sm.lambda_max
+        );
     }
 }
