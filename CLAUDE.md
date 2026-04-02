@@ -52,13 +52,23 @@ Propagation normalizes per-node incoming weights to sum <= 0.95, ensuring conver
 
 ## Health Index
 
-Composite score from three sub-scores (see `compute_health_index` in `stress.rs`):
+FEA-aligned scoring using safety factor zone fractions, structural coupling (λ_max), and signal penalty (see `compute_health_index` in `stress.rs`):
 
-| Sub-score | Weight | Input | Normalization |
-|-----------|--------|-------|---------------|
-| Risk | 0.40 | **Median+P75 blend** (75/25) direct_score + concentration + critical mass penalty | 5x amplification, penalty capped at 15% |
-| Signals | 0.35 | God modules, cycles, bombs, fragile boundaries, systemic complexity | **sqrt(N)** normalization (systemic complexity: flat 2.5x, codebase-level) |
-| Structure | 0.25 | Cycle + unstable dep entanglement | **sqrt(N)** normalization |
+**Formula**: `score = zone_sub_score × coupling_modifier − signal_penalty`
+
+| Component | Formula | Range |
+|-----------|---------|-------|
+| Zone sub-score | Weighted avg: Stable×1.0 + Healthy×0.90 + Warning×0.65 + Danger×0.35 + Critical×0.15, with small-sample blend toward 0.75 prior for <50 active modules | [0, 1] |
+| Coupling modifier | Uses normalized λ (λ/√N). norm<1: `1.0 + (1−norm)×0.05`, norm>1: `1.0 − log₂(norm)×0.05` (clamped [0.90, 1.05]) | [0.90, 1.05] |
+| Signal penalty | `0.25 × weighted_signals / (weighted_signals + 3.0)`, sigmoid saturation | [0, 0.25] |
+
+**λ_max** (spectral radius of structural Import graph, unit weights):
+- Raw λ_max is always >>1 for real codebases (hub modules with many imports)
+- Normalized: λ/√N measures coupling density relative to codebase size
+- norm < 1.0: loosely coupled → slight bonus
+- norm > 1.0: tightly coupled → gentle penalty
+
+Legacy sub-scores (risk, signal, structural) are still computed for backward compatibility but no longer drive the grade.
 
 Grade thresholds: A ≥ 0.85, B ≥ 0.70, C ≥ 0.55, D ≥ 0.40, F < 0.40.
 
