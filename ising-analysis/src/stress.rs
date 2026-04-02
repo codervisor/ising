@@ -721,44 +721,64 @@ fn compute_health_index(
 
     // === Zone sub-score ===
     // Weighted average: each zone contributes proportionally to its health.
-    // Weights: Stable=1.0, Healthy=0.85, Warning=0.55, Danger=0.25, Critical=0.0
-    // These map to the midpoint "how safe is a module in this zone?" intuition.
-    let zone_sub_score = (frac_stable * 1.0
-        + frac_healthy * 0.85
-        + frac_warning * 0.55
-        + frac_danger * 0.25
-        + frac_critical * 0.0)
-        .clamp(0.0, 1.0);
+    // Weights: Stable=1.0, Healthy=0.90, Warning=0.65, Danger=0.35, Critical=0.15
+    //
+    // Critical gets 0.15 (not 0.0) because SF<1.0 doesn't mean "broken" — it means
+    // the module is under change pressure relative to its complexity. For actively
+    // maintained frameworks (flask, gin), core modules are always high-churn and thus
+    // tend to land in Critical. Giving them some weight prevents small frameworks
+    // from being unfairly penalized.
+    let raw_zone_score = frac_stable * 1.0
+        + frac_healthy * 0.90
+        + frac_warning * 0.65
+        + frac_danger * 0.35
+        + frac_critical * 0.15;
+
+    // Small-sample adjustment: when few modules are active (<50), zone fractions
+    // are noisy — one module changing zones shifts the score by 1/N. We blend the
+    // raw zone score toward a neutral prior (0.75) proportionally to sample size.
+    // At 50+ active modules, no adjustment. At 10, blend 40% toward prior.
+    let sample_blend = (active_f / 50.0).min(1.0);
+    let zone_sub_score =
+        (raw_zone_score * sample_blend + 0.75 * (1.0 - sample_blend)).clamp(0.0, 1.0);
 
     // === Coupling modifier (λ_max) ===
-    // λ_max determines whether failures in bad zones cascade or stay contained.
+    // λ_max is the spectral radius of the structural Import graph with unit weights.
+    // For real codebases, λ_max is always >>1 because hub modules import many others
+    // (a module importing k files creates degree k, giving λ ≥ sqrt(k)).
     //
-    // When λ < 1.0 (modular): perturbations decay. Critical modules are local problems.
-    //   → Slight bonus: the zone score slightly understates health.
-    // When λ ≈ 1.0 (phase transition): perturbations persist. Neutral modifier.
-    // When λ > 1.0 (coupled): perturbations amplify. Critical modules are systemic risks.
-    //   → Penalty: the zone score understates the cascading danger.
+    // To make λ_max comparable across codebases of different sizes, we normalize:
+    //   normalized_lambda = λ_max / sqrt(total_modules)
+    // This measures coupling *density*: how connected the graph is relative to its size.
+    //   - Complete graph K_n: λ = n-1, normalized = sqrt(n) → grows with size
+    //   - Star graph:        λ = sqrt(k), normalized = sqrt(k/n) → small for large n
+    //   - Random graph:      λ ≈ avg_degree, normalized = avg_degree/sqrt(n)
     //
-    // Formula: modifier = 1.0 + bonus - penalty
-    //   bonus  = max(0, (1.0 - λ) * 0.10)   → up to +10% for very modular code
-    //   penalty = max(0, (λ - 1.0) * 0.05)   → grows with coupling, capped
+    // Typical ranges for normalized_lambda:
+    //   < 0.5: loosely coupled
+    //   0.5-2.0: moderate coupling (most real codebases)
+    //   > 2.0: tightly coupled
     //
-    // The penalty is gentler than the bonus because λ_max for real codebases can be
-    // very large (>50 for monoliths), and we don't want the modifier to dominate.
-    // Instead it nudges the score — the zone fractions are the primary signal.
-    let coupling_bonus = if lambda_max < 1.0 {
-        (1.0 - lambda_max) * 0.10
+    // The modifier applies a gentle penalty/bonus based on normalized coupling:
+    //   - normalized < 1.0: slight bonus (up to +5%)
+    //   - normalized > 1.0: gentle penalty (up to -10%)
+    let normalized_lambda = if total_f > 1.0 {
+        lambda_max / total_f.sqrt()
     } else {
         0.0
     };
-    let coupling_penalty = if lambda_max > 1.0 {
-        // Use log to tame large λ values: log2(λ) * 0.04
-        // λ=2 → 0.04, λ=4 → 0.08, λ=16 → 0.16, λ=64 → 0.24
-        (lambda_max.log2() * 0.04).min(0.25)
+    let coupling_bonus = if normalized_lambda < 1.0 {
+        (1.0 - normalized_lambda) * 0.05
     } else {
         0.0
     };
-    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.75, 1.10);
+    let coupling_penalty = if normalized_lambda > 1.0 {
+        // Gentle log penalty: log2(norm_λ) * 0.05, capped at 10%
+        (normalized_lambda.log2() * 0.05).min(0.10)
+    } else {
+        0.0
+    };
+    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.90, 1.05);
 
     // === Signal penalty ===
     // Signals are architectural problems detected across layers. Instead of a separate
@@ -861,10 +881,10 @@ fn compute_health_index(
             "No ticking bombs detected; this may indicate missing defect/bug-fix data".to_string(),
         );
     }
-    if lambda_max >= 1.0 {
+    if normalized_lambda > 2.0 {
         caveats.push(format!(
-            "Structural coupling λ={:.1} (≥1.0): failures may cascade across modules",
-            lambda_max
+            "High structural coupling: λ/√N={:.2} (λ={:.1}), failures likely cascade across modules",
+            normalized_lambda, lambda_max
         ));
     }
     if frac_critical > 0.10 {
