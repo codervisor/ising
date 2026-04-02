@@ -114,14 +114,15 @@ pub fn compute_graph_metrics(graph: &UnifiedGraph) -> GraphMetrics {
     }
 }
 
-/// Spectral metrics for the coupling graph.
+/// Spectral metrics for the dependency graph.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectralMetrics {
-    /// Maximum eigenvalue of the coupling adjacency matrix.
+    /// Maximum eigenvalue of the structural adjacency matrix (unit weights).
+    /// Measures the topological amplification factor of the dependency graph.
     /// λ < 1.0 = perturbations decay (stable), λ ≥ 1.0 = perturbations cascade (critical).
     pub lambda_max: f64,
     /// Eigenvector centrality: for each node, its component in the dominant eigenvector.
-    /// Higher = more responsible for driving propagation.
+    /// Higher = more responsible for driving propagation. Normalized to [0, 1].
     pub eigenvector_centrality: HashMap<String, f64>,
     /// Number of power iteration steps to convergence.
     pub iterations: usize,
@@ -129,34 +130,37 @@ pub struct SpectralMetrics {
     pub converged: bool,
 }
 
-/// Compute spectral metrics (λ_max and eigenvector centrality) for the coupling graph.
+/// Compute spectral metrics (λ_max and eigenvector centrality) from the structural
+/// dependency graph (Import edges only, unit weights).
 ///
-/// Uses power iteration on the combined adjacency matrix (structural + co-change edges,
-/// weighted by damping factors matching the propagation model). The adjacency is treated
-/// as undirected (bidirectional) since risk propagation flows both ways.
+/// This measures the **static topology** of the codebase — how the dependency structure
+/// alone amplifies perturbations. It does not depend on change history, time windows,
+/// or arbitrary damping parameters.
 ///
-/// Power iteration works because the adjacency matrix of a coupling graph is non-negative,
-/// and by the Perron-Frobenius theorem, the dominant eigenvalue is real and positive with
-/// a non-negative eigenvector.
-///
-/// # Arguments
-/// * `graph` - The unified graph
-/// * `structural_damping` - Weight factor for Import edges (default: 0.15)
-/// * `cochange_damping` - Weight factor for CoChange edges (default: 0.30)
+/// Uses power iteration on the undirected adjacency matrix (each directed Import edge
+/// becomes bidirectional with weight 1.0). By the Perron-Frobenius theorem, the
+/// dominant eigenvalue is real and positive with a non-negative eigenvector.
 ///
 /// # Performance
 /// O(edges × iterations) — typically 20-50 iterations for convergence.
-/// For a 40K-node graph with 500K edges, this is ~10M operations.
-pub fn compute_spectral_metrics(
+pub fn compute_spectral_metrics(graph: &UnifiedGraph) -> SpectralMetrics {
+    compute_spectral_metrics_weighted(graph, &EdgeType::Imports, false)
+}
+
+/// Compute spectral metrics from edges of a specific type.
+///
+/// If `use_edge_weights` is false, all edges are treated as weight 1.0 (topology only).
+/// If true, the actual edge weights are used (e.g., co-change coupling probabilities).
+pub fn compute_spectral_metrics_weighted(
     graph: &UnifiedGraph,
-    structural_damping: f64,
-    cochange_damping: f64,
+    edge_type: &EdgeType,
+    use_edge_weights: bool,
 ) -> SpectralMetrics {
     const MAX_ITER: usize = 200;
     const EPSILON: f64 = 1e-6;
 
-    // Build adjacency list with combined weights (bidirectional).
-    // We index by dense integer IDs for performance, mapping back to string IDs at the end.
+    // Build adjacency list (bidirectional, for undirected spectral analysis).
+    // Dense integer IDs for performance, mapped back to string IDs at the end.
     let node_ids: Vec<&str> = graph.node_ids().collect();
     let n = node_ids.len();
 
@@ -169,28 +173,15 @@ pub fn compute_spectral_metrics(
         };
     }
 
-    // Map string IDs to dense indices
     let id_to_idx: HashMap<&str, usize> =
         node_ids.iter().enumerate().map(|(i, &s)| (s, i)).collect();
 
-    // Build sparse adjacency: Vec<Vec<(neighbor_idx, weight)>>
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
 
-    // Add structural (Imports) edges — bidirectional
-    let import_edges = graph.edges_of_type(&EdgeType::Imports);
-    for &(src, tgt, weight) in &import_edges {
+    let edges = graph.edges_of_type(edge_type);
+    for &(src, tgt, weight) in &edges {
         if let (Some(&si), Some(&ti)) = (id_to_idx.get(src), id_to_idx.get(tgt)) {
-            let w = weight * structural_damping;
-            adj[si].push((ti, w));
-            adj[ti].push((si, w));
-        }
-    }
-
-    // Add co-change edges — bidirectional
-    let cochange_edges = graph.edges_of_type(&EdgeType::CoChanges);
-    for &(src, tgt, weight) in &cochange_edges {
-        if let (Some(&si), Some(&ti)) = (id_to_idx.get(src), id_to_idx.get(tgt)) {
-            let w = weight * cochange_damping;
+            let w = if use_edge_weights { weight } else { 1.0 };
             adj[si].push((ti, w));
             adj[ti].push((si, w));
         }
@@ -379,7 +370,7 @@ mod tests {
     #[test]
     fn test_spectral_empty_graph() {
         let g = UnifiedGraph::new();
-        let sm = compute_spectral_metrics(&g, 0.15, 0.30);
+        let sm = compute_spectral_metrics(&g);
         assert_eq!(sm.lambda_max, 0.0);
         assert!(sm.converged);
     }
@@ -390,17 +381,16 @@ mod tests {
         g.add_node(Node::module("a", "a.py"));
         g.add_node(Node::module("b", "b.py"));
         // No edges
-        let sm = compute_spectral_metrics(&g, 0.15, 0.30);
+        let sm = compute_spectral_metrics(&g);
         assert_eq!(sm.lambda_max, 0.0);
         assert!(sm.converged);
     }
 
     #[test]
     fn test_spectral_chain_graph() {
-        // A→B→C chain (no cycles). With damping=1.0 and unit weights:
-        // Adjacency (undirected): A-B, B-C
-        // For a path of 3 nodes, λ_max = sqrt(2) ≈ 1.414
-        // With structural_damping=1.0: edges have weight 1.0
+        // A→B→C chain. Unit weights on Import edges.
+        // Path graph P_3 undirected: eigenvalues {-sqrt(2), 0, sqrt(2)}
+        // λ_max = sqrt(2) ≈ 1.414
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
         g.add_node(Node::module("b", "b.py"));
@@ -408,9 +398,7 @@ mod tests {
         g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
         g.add_edge("b", "c", EdgeType::Imports, 1.0).unwrap();
 
-        let sm = compute_spectral_metrics(&g, 1.0, 0.0);
-        // Path graph P_3 undirected: eigenvalues are {-sqrt(2), 0, sqrt(2)}
-        // λ_max = sqrt(2) ≈ 1.414
+        let sm = compute_spectral_metrics(&g);
         assert!(sm.converged);
         assert!(
             (sm.lambda_max - std::f64::consts::SQRT_2).abs() < 0.01,
@@ -421,8 +409,8 @@ mod tests {
 
     #[test]
     fn test_spectral_complete_graph() {
-        // K_4 (4 nodes, all connected). λ_max = 3 (N-1) for unit-weight undirected.
-        // With structural_damping=1.0: each edge has weight 1.0.
+        // K_4 (4 nodes, all connected). Unit weights.
+        // λ_max = N-1 = 3 for unit-weight undirected complete graph.
         let mut g = UnifiedGraph::new();
         let nodes = ["a", "b", "c", "d"];
         for &n in &nodes {
@@ -435,9 +423,7 @@ mod tests {
             }
         }
 
-        let sm = compute_spectral_metrics(&g, 1.0, 0.0);
-        // K_4 undirected: λ_max = 3 (since we add bidirectional edges,
-        // each undirected edge becomes two directed edges with weight 1.0)
+        let sm = compute_spectral_metrics(&g);
         assert!(sm.converged);
         assert!(
             (sm.lambda_max - 3.0).abs() < 0.1,
@@ -447,54 +433,46 @@ mod tests {
     }
 
     #[test]
-    fn test_spectral_damping_scales_lambda() {
-        // Same graph, different damping → λ should scale proportionally
+    fn test_spectral_unit_weights_ignore_edge_weight() {
+        // compute_spectral_metrics uses unit weights, so edge weight should be ignored.
+        // Two nodes connected by Import edge with weight 5.0 → treated as 1.0 → λ = 1.0
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
         g.add_node(Node::module("b", "b.py"));
-        g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
+        g.add_edge("a", "b", EdgeType::Imports, 5.0).unwrap();
 
-        let sm_full = compute_spectral_metrics(&g, 1.0, 0.0);
-        let sm_half = compute_spectral_metrics(&g, 0.5, 0.0);
-
-        // For a single undirected edge (2 nodes), λ_max = weight
-        // With damping=1.0: λ = 1.0, with damping=0.5: λ = 0.5
-        assert!(sm_full.converged && sm_half.converged);
+        let sm = compute_spectral_metrics(&g);
+        assert!(sm.converged);
         assert!(
-            (sm_full.lambda_max - 1.0).abs() < 0.01,
-            "Expected λ=1.0, got {}",
-            sm_full.lambda_max
-        );
-        assert!(
-            (sm_half.lambda_max - 0.5).abs() < 0.01,
-            "Expected λ=0.5, got {}",
-            sm_half.lambda_max
+            (sm.lambda_max - 1.0).abs() < 0.01,
+            "Expected λ=1.0 (unit weight), got {}",
+            sm.lambda_max
         );
     }
 
     #[test]
-    fn test_spectral_cochange_edges() {
-        // Verify co-change edges contribute to λ
+    fn test_spectral_weighted_uses_edge_weight() {
+        // compute_spectral_metrics_weighted with use_edge_weights=true respects weights.
+        // Two nodes connected by CoChanges edge with weight 2.0 → λ = 2.0
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("a", "a.py"));
         g.add_node(Node::module("b", "b.py"));
-        // Only co-change, no structural
         g.add_edge("a", "b", EdgeType::CoChanges, 2.0).unwrap();
 
-        let sm = compute_spectral_metrics(&g, 0.0, 1.0);
-        // Single undirected edge weight 2.0 → λ = 2.0
+        let sm = compute_spectral_metrics_weighted(&g, &EdgeType::CoChanges, true);
         assert!(sm.converged);
         assert!(
             (sm.lambda_max - 2.0).abs() < 0.01,
-            "Expected λ=2.0, got {}",
+            "Expected λ=2.0 (weighted), got {}",
             sm.lambda_max
         );
     }
 
     #[test]
     fn test_spectral_eigenvector_hub_node() {
-        // Star graph: A is hub, B/C/D are leaves. A→B, A→C, A→D
-        // Hub should have highest eigenvector centrality
+        // Star graph: hub connected to 3 leaves. Unit weights.
+        // Hub should have highest eigenvector centrality.
+        // Star K_{1,3}: λ_max = sqrt(3) ≈ 1.732
         let mut g = UnifiedGraph::new();
         g.add_node(Node::module("hub", "hub.py"));
         g.add_node(Node::module("leaf1", "leaf1.py"));
@@ -504,9 +482,8 @@ mod tests {
         g.add_edge("hub", "leaf2", EdgeType::Imports, 1.0).unwrap();
         g.add_edge("hub", "leaf3", EdgeType::Imports, 1.0).unwrap();
 
-        let sm = compute_spectral_metrics(&g, 1.0, 0.0);
+        let sm = compute_spectral_metrics(&g);
         assert!(sm.converged);
-        // Hub should have centrality = 1.0 (normalized max)
         let hub_c = sm.eigenvector_centrality.get("hub").copied().unwrap_or(0.0);
         let leaf_c = sm
             .eigenvector_centrality
@@ -522,7 +499,6 @@ mod tests {
             leaf_c < hub_c,
             "Leaf centrality ({leaf_c:.6}) should be less than hub ({hub_c:.6})"
         );
-        // Star graph K_{1,3}: λ_max = sqrt(3) ≈ 1.732
         assert!(
             (sm.lambda_max - 3.0_f64.sqrt()).abs() < 0.05,
             "Expected λ≈1.732 for star K_1,3, got {}",
