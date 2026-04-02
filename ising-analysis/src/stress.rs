@@ -10,7 +10,7 @@ use ising_core::fea::{
     SafetyZone,
 };
 use ising_core::graph::{EdgeType, NodeType, UnifiedGraph};
-use ising_core::metrics::{compute_node_metrics, normalize};
+use ising_core::metrics::{compute_node_metrics, compute_spectral_metrics, normalize};
 use std::collections::HashMap;
 
 /// Maximum safety factor value (clamp to avoid infinity).
@@ -334,7 +334,7 @@ fn compute_risk_field_with_loads(
     // Compute aggregate health index.
     let default_summary = SignalSummary::default();
     let summary = signal_summary.unwrap_or(&default_summary);
-    let health = Some(compute_health_index(&nodes, summary));
+    let health = Some(compute_health_index(&nodes, summary, graph));
 
     // Sort by direct_score descending (highest risk first) for the primary ranking.
     // This replaces the old SF-ascending sort which was dominated by propagation.
@@ -644,11 +644,19 @@ fn assign_risk_tiers(nodes: &mut [NodeRisk]) {
 /// - sqrt(N) normalization instead of count/N → sub-linear, scale-fair
 /// - Sub-score decomposition → transparent what drives the grade
 /// - Caveats emitted when data is insufficient → honest about limitations
-fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIndex {
+fn compute_health_index(
+    nodes: &[NodeRisk],
+    signals: &SignalSummary,
+    graph: &UnifiedGraph,
+) -> HealthIndex {
     let total_modules = nodes.len();
     let active: Vec<&NodeRisk> = nodes.iter().filter(|n| n.change_load > 0.0).collect();
     let active_modules = active.len();
     let total_f = (total_modules as f64).max(1.0);
+
+    // Compute structural spectral radius (unit weights on Import edges).
+    let spectral = compute_spectral_metrics(graph);
+    let lambda_max = spectral.lambda_max;
 
     if active_modules == 0 {
         let caveats =
@@ -662,10 +670,19 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
             high_count: 0,
             risk_concentration: 1.0,
             avg_direct_score: 0.0,
+            frac_stable: 0.0,
+            frac_healthy: 0.0,
+            frac_warning: 0.0,
+            frac_danger: 0.0,
+            frac_critical: 0.0,
+            lambda_max,
             signal_density: signals.total_signals as f64 / total_f,
             god_module_density: signals.god_module_count as f64 / total_f,
             cycle_density: signals.cycle_count as f64 / total_f,
             unstable_dep_density: signals.unstable_dep_count as f64 / total_f,
+            zone_sub_score: 1.0,
+            coupling_modifier: 1.0,
+            signal_penalty: 0.0,
             risk_sub_score: 1.0,
             signal_sub_score: 1.0,
             structural_sub_score: 1.0,
@@ -682,90 +699,73 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         .filter(|n| n.risk_tier == RiskTier::High)
         .count();
 
-    // --- Median and P75 direct score across active modules ---
-    // We use MEDIAN instead of mean because mean is dominated by outliers.
-    // In small repos (e.g., gin with 98 modules), one hot file inflates the mean
-    // from ~0.05 to ~0.36. Median gives a representative "typical module" measure.
+    // === Zone fractions ===
+    // Count active modules in each safety zone. This directly measures what fraction
+    // of the codebase is in each structural health state.
+    let active_f = active_modules as f64;
+    let mut zone_counts = [0usize; 5]; // [stable, healthy, warning, danger, critical]
+    for n in &active {
+        match n.zone {
+            SafetyZone::Stable => zone_counts[0] += 1,
+            SafetyZone::Healthy => zone_counts[1] += 1,
+            SafetyZone::Warning => zone_counts[2] += 1,
+            SafetyZone::Danger => zone_counts[3] += 1,
+            SafetyZone::Critical => zone_counts[4] += 1,
+        }
+    }
+    let frac_stable = zone_counts[0] as f64 / active_f;
+    let frac_healthy = zone_counts[1] as f64 / active_f;
+    let frac_warning = zone_counts[2] as f64 / active_f;
+    let frac_danger = zone_counts[3] as f64 / active_f;
+    let frac_critical = zone_counts[4] as f64 / active_f;
+
+    // === Zone sub-score ===
+    // Weighted average: each zone contributes proportionally to its health.
+    // Weights: Stable=1.0, Healthy=0.85, Warning=0.55, Danger=0.25, Critical=0.0
+    // These map to the midpoint "how safe is a module in this zone?" intuition.
+    let zone_sub_score = (frac_stable * 1.0
+        + frac_healthy * 0.85
+        + frac_warning * 0.55
+        + frac_danger * 0.25
+        + frac_critical * 0.0)
+        .clamp(0.0, 1.0);
+
+    // === Coupling modifier (λ_max) ===
+    // λ_max determines whether failures in bad zones cascade or stay contained.
     //
-    // However, median alone is blind to tail behavior: large repos with thousands
-    // of low-churn modules always have a near-zero median, making risk_sub_score
-    // ≈ 1.0 regardless of how many high-risk modules exist. To fix this, we blend
-    // median with P75 (75th percentile), which captures upper-distribution risk.
-    // The 75/25 blend provides tail sensitivity without over-penalizing repos
-    // where most modules are genuinely low-risk.
-    let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
-    let avg_direct_score = total_direct / active_modules as f64;
-
-    let mut scores: Vec<f64> = active.iter().map(|n| n.direct_score).collect();
-    scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median_direct_score = if scores.len().is_multiple_of(2) && scores.len() >= 2 {
-        (scores[scores.len() / 2 - 1] + scores[scores.len() / 2]) / 2.0
-    } else {
-        scores[scores.len() / 2]
-    };
-    let p75_idx = ((scores.len() as f64 * 0.75).floor() as usize).min(scores.len() - 1);
-    let p75_direct_score = scores[p75_idx];
-    let representative_score = median_direct_score * 0.75 + p75_direct_score * 0.25;
-
-    // --- Risk concentration ---
-    scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let top_10_count = (scores.len() as f64 * 0.10).ceil() as usize;
-    let top_10_sum: f64 = scores.iter().take(top_10_count).sum();
-    let risk_concentration = if total_direct > 0.0 {
-        top_10_sum / total_direct
-    } else {
-        1.0
-    };
-
-    // --- Signal densities ---
-    // Stored as per-module density for display, but scoring uses sqrt normalization.
-    let signal_density = signals.total_signals as f64 / total_f;
-    let god_module_density = signals.god_module_count as f64 / total_f;
-    let cycle_density = signals.cycle_count as f64 / total_f;
-    let unstable_dep_density = signals.unstable_dep_count as f64 / total_f;
-
-    // === Sub-score 1: Risk (40%) ===
-    // Use blended median+P75 direct score (robust yet tail-sensitive) with amplification.
-    // For very small samples (active_modules < 20), reduce the amplification factor
-    // to prevent a single hot file from dominating (e.g., flask: 16 active modules,
-    // one high-risk file pulls risk_sub_score from ~0.7 to 0.32).
-    let amplification = if active_modules < 20 {
-        // Scale from 2.0 at 1 module toward 5.0 as we approach 20 modules
-        let normalized = (active_modules as f64 - 1.0) / 19.0;
-        2.0 + 3.0 * normalized
-    } else {
-        5.0
-    };
-    let base_health = 1.0 / (1.0 + representative_score * amplification);
-    let concentration_factor = 0.8 + 0.2 * risk_concentration;
-
-    // Critical mass penalty: when the absolute number of high-risk modules (critical
-    // + high tier) is substantial, the repo has systemic risk that percentile-based
-    // metrics hide. We penalize proportionally to sqrt(critical+high)/sqrt(total),
-    // capped at 20%. This addresses the "268 critical modules in TypeScript = A"
-    // problem without affecting small repos.
-    let high_risk_count = (critical_count + high_count) as f64;
-    let critical_mass_penalty = if high_risk_count > 30.0 {
-        let ratio = high_risk_count.sqrt() / total_f.sqrt();
-        (ratio * 0.6).min(0.15)
+    // When λ < 1.0 (modular): perturbations decay. Critical modules are local problems.
+    //   → Slight bonus: the zone score slightly understates health.
+    // When λ ≈ 1.0 (phase transition): perturbations persist. Neutral modifier.
+    // When λ > 1.0 (coupled): perturbations amplify. Critical modules are systemic risks.
+    //   → Penalty: the zone score understates the cascading danger.
+    //
+    // Formula: modifier = 1.0 + bonus - penalty
+    //   bonus  = max(0, (1.0 - λ) * 0.10)   → up to +10% for very modular code
+    //   penalty = max(0, (λ - 1.0) * 0.05)   → grows with coupling, capped
+    //
+    // The penalty is gentler than the bonus because λ_max for real codebases can be
+    // very large (>50 for monoliths), and we don't want the modifier to dominate.
+    // Instead it nudges the score — the zone fractions are the primary signal.
+    let coupling_bonus = if lambda_max < 1.0 {
+        (1.0 - lambda_max) * 0.10
     } else {
         0.0
     };
+    let coupling_penalty = if lambda_max > 1.0 {
+        // Use log to tame large λ values: log2(λ) * 0.04
+        // λ=2 → 0.04, λ=4 → 0.08, λ=16 → 0.16, λ=64 → 0.24
+        (lambda_max.log2() * 0.04).min(0.25)
+    } else {
+        0.0
+    };
+    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.75, 1.10);
 
-    let risk_sub_score =
-        (base_health * concentration_factor * (1.0 - critical_mass_penalty)).clamp(0.0, 1.0);
-
-    // === Sub-score 2: Signals (35%) ===
-    // Signal counts are normalized by sqrt(total_modules) instead of total_modules.
+    // === Signal penalty ===
+    // Signals are architectural problems detected across layers. Instead of a separate
+    // sub-score that gates grades, signals act as a penalty on the zone-based score.
     //
-    // Why: count/N lets large repos hide behind their denominator. 131 god modules in
-    // 15,000 files = 0.87% looks fine, but 131 god modules is genuinely bad. count/sqrt(N)
-    // keeps the relationship sub-linear — same principle as TF-IDF document frequency
-    // normalization, which is well-studied for comparing metrics across different-sized
-    // collections.
-    //
-    // Effect: gin 2/sqrt(98)=0.20, grafana 131/sqrt(15000)=1.07 — 5.3x difference
-    // vs 65x with raw counts or 0.4x with density. sqrt gives a balanced middle ground.
+    // This ensures that a codebase with perfect zone distribution but many god modules
+    // still gets penalized, while a codebase with zero signals doesn't get a free A.
     let sqrt_n = total_f.sqrt();
     let weighted_signal_score = (signals.god_module_count as f64 / sqrt_n) * 3.0
         + (signals.cycle_count as f64 / sqrt_n) * 4.0
@@ -775,23 +775,14 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         + (signals.unstable_dep_count as f64 / sqrt_n) * 2.0
         + (signals.ghost_coupling_count as f64 / sqrt_n) * 1.0
         + (signals.systemic_complexity_count as f64) * 2.5;
-    // Note: OrphanFunction, OrphanModule, and IntraFileHotspot are intentionally zero-weighted.
-    // They represent AST analysis limitations (cross-file calls invisible to static analysis),
-    // not reliable architectural signals. Weighting them would over-penalize every repo —
-    // e.g., TypeScript has 2,124 orphan_function signals that are mostly unresolved cross-file
-    // calls, not actual dead code.
-    //
-    // Scale factor of 0.3: calibrated so that weighted_signal_score=2 → sub_score ≈ 0.63
-    let signal_sub_score = (1.0 / (1.0 + weighted_signal_score * 0.3)).clamp(0.0, 1.0);
+    // Convert to a penalty [0, 0.25]. Sigmoid-like curve: penalty saturates at 0.25.
+    // weighted_signal_score=1 → penalty ≈ 0.06, =3 → 0.13, =10 → 0.21
+    let signal_penalty =
+        (0.25 * weighted_signal_score / (weighted_signal_score + 3.0)).clamp(0.0, 0.25);
 
-    // === Sub-score 3: Structure (25%) ===
-    // Uses sqrt normalization for consistency.
-    let entanglement_score = (signals.cycle_count + signals.unstable_dep_count) as f64 / sqrt_n;
-    let structural_sub_score = (1.0 / (1.0 + entanglement_score * 0.5)).clamp(0.0, 1.0);
-
-    // === Final composite score ===
-    let score = (risk_sub_score * 0.40 + signal_sub_score * 0.35 + structural_sub_score * 0.25)
-        .clamp(0.0, 1.0);
+    // === Final score ===
+    // score = zone_sub_score * coupling_modifier - signal_penalty
+    let score = (zone_sub_score * coupling_modifier - signal_penalty).clamp(0.0, 1.0);
 
     let grade = if score >= 0.85 {
         "A"
@@ -806,7 +797,52 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
     }
     .to_string();
 
-    // --- Caveats: flag potential bias or insufficient data ---
+    // === Legacy sub-scores (for backward compatibility) ===
+    let total_direct: f64 = active.iter().map(|n| n.direct_score).sum();
+    let avg_direct_score = total_direct / active_f;
+
+    let mut scores: Vec<f64> = active.iter().map(|n| n.direct_score).collect();
+    scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_direct_score = if scores.len().is_multiple_of(2) && scores.len() >= 2 {
+        (scores[scores.len() / 2 - 1] + scores[scores.len() / 2]) / 2.0
+    } else {
+        scores[scores.len() / 2]
+    };
+    let p75_idx = ((scores.len() as f64 * 0.75).floor() as usize).min(scores.len() - 1);
+    let p75_direct_score = scores[p75_idx];
+    let representative_score = median_direct_score * 0.75 + p75_direct_score * 0.25;
+
+    scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let top_10_count = (scores.len() as f64 * 0.10).ceil() as usize;
+    let top_10_sum: f64 = scores.iter().take(top_10_count).sum();
+    let risk_concentration = if total_direct > 0.0 {
+        top_10_sum / total_direct
+    } else {
+        1.0
+    };
+
+    let amplification = if active_modules < 20 {
+        let normalized = (active_f - 1.0) / 19.0;
+        2.0 + 3.0 * normalized
+    } else {
+        5.0
+    };
+    let base_health = 1.0 / (1.0 + representative_score * amplification);
+    let concentration_factor = 0.8 + 0.2 * risk_concentration;
+    let risk_sub_score = (base_health * concentration_factor).clamp(0.0, 1.0);
+
+    let signal_sub_score = (1.0 / (1.0 + weighted_signal_score * 0.3)).clamp(0.0, 1.0);
+
+    let entanglement_score = (signals.cycle_count + signals.unstable_dep_count) as f64 / sqrt_n;
+    let structural_sub_score = (1.0 / (1.0 + entanglement_score * 0.5)).clamp(0.0, 1.0);
+
+    // Signal densities for display.
+    let signal_density = signals.total_signals as f64 / total_f;
+    let god_module_density = signals.god_module_count as f64 / total_f;
+    let cycle_density = signals.cycle_count as f64 / total_f;
+    let unstable_dep_density = signals.unstable_dep_count as f64 / total_f;
+
+    // --- Caveats ---
     let mut caveats = Vec::new();
     if active_modules < total_modules / 20 {
         caveats.push(format!(
@@ -825,10 +861,16 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
             "No ticking bombs detected; this may indicate missing defect/bug-fix data".to_string(),
         );
     }
-    if critical_count > 100 {
+    if lambda_max >= 1.0 {
         caveats.push(format!(
-            "{} modules classified as critical risk; percentile-based tiers may understate absolute magnitude",
-            critical_count
+            "Structural coupling λ={:.1} (≥1.0): failures may cascade across modules",
+            lambda_max
+        ));
+    }
+    if frac_critical > 0.10 {
+        caveats.push(format!(
+            "{:.0}% of active modules in critical zone (SF<1.0)",
+            frac_critical * 100.0
         ));
     }
 
@@ -841,10 +883,19 @@ fn compute_health_index(nodes: &[NodeRisk], signals: &SignalSummary) -> HealthIn
         high_count,
         risk_concentration,
         avg_direct_score,
+        frac_stable,
+        frac_healthy,
+        frac_warning,
+        frac_danger,
+        frac_critical,
+        lambda_max,
         signal_density,
         god_module_density,
         cycle_density,
         unstable_dep_density,
+        zone_sub_score,
+        coupling_modifier,
+        signal_penalty,
         risk_sub_score,
         signal_sub_score,
         structural_sub_score,

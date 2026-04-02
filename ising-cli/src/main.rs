@@ -612,47 +612,67 @@ fn cmd_health(args: HealthArgs) -> Result<i32> {
                 health.active_modules, health.total_modules
             );
             println!();
-            println!("  Sub-scores:");
+            println!("  Safety zone distribution (active modules):");
             println!(
-                "    Risk:             {:.2}  (median direct score, concentration)",
-                health.risk_sub_score
+                "    Stable  (SF>3.0):  {:>5.1}%",
+                health.frac_stable * 100.0
             );
             println!(
-                "    Signals:          {:.2}  (god modules, bombs, fragile boundaries)",
-                health.signal_sub_score
+                "    Healthy (SF 2-3):  {:>5.1}%",
+                health.frac_healthy * 100.0
             );
             println!(
-                "    Structure:        {:.2}  (cycles, unstable deps)",
-                health.structural_sub_score
+                "    Warning (SF 1.5-2):{:>5.1}%",
+                health.frac_warning * 100.0
+            );
+            println!(
+                "    Danger  (SF 1-1.5):{:>5.1}%",
+                health.frac_danger * 100.0
+            );
+            println!(
+                "    Critical(SF<1.0):  {:>5.1}%",
+                health.frac_critical * 100.0
             );
             println!();
+            println!("  Scoring breakdown:");
             println!(
-                "  Signal density:     {:.3} signals/module",
-                health.signal_density
+                "    Zone score:        {:.3}  (weighted zone fractions)",
+                health.zone_sub_score
             );
-            if health.god_module_density > 0.0 {
-                println!(
-                    "    God modules:      {:.1}%",
-                    health.god_module_density * 100.0
-                );
-            }
-            if health.cycle_density > 0.0 {
-                println!("    Dep cycles:       {:.1}%", health.cycle_density * 100.0);
-            }
-            if health.unstable_dep_density > 0.0 {
-                println!(
-                    "    Unstable deps:    {:.1}%",
-                    health.unstable_dep_density * 100.0
-                );
-            }
+            println!(
+                "    Coupling modifier: {:.3}  (λ_max={:.1})",
+                health.coupling_modifier, health.lambda_max
+            );
+            println!(
+                "    Signal penalty:   -{:.3}  (architectural signals)",
+                health.signal_penalty
+            );
             println!();
-            println!("  Risk distribution:");
+            if health.signal_density > 0.0 {
+                println!(
+                    "  Signal density:     {:.3} signals/module",
+                    health.signal_density
+                );
+                if health.god_module_density > 0.0 {
+                    println!(
+                        "    God modules:      {:.1}%",
+                        health.god_module_density * 100.0
+                    );
+                }
+                if health.cycle_density > 0.0 {
+                    println!("    Dep cycles:       {:.1}%", health.cycle_density * 100.0);
+                }
+                if health.unstable_dep_density > 0.0 {
+                    println!(
+                        "    Unstable deps:    {:.1}%",
+                        health.unstable_dep_density * 100.0
+                    );
+                }
+                println!();
+            }
+            println!("  Risk tiers:");
             println!("    Critical (top 1%): {}", health.critical_count);
             println!("    High (top 5%):     {}", health.high_count);
-            println!(
-                "    Concentration:     {:.0}%",
-                health.risk_concentration * 100.0
-            );
             if !health.caveats.is_empty() {
                 println!();
                 println!("  Caveats:");
