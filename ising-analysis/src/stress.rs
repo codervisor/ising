@@ -768,17 +768,19 @@ fn compute_health_index(
         0.0
     };
     let coupling_bonus = if normalized_lambda < 1.0 {
-        (1.0 - normalized_lambda) * 0.05
+        (1.0 - normalized_lambda) * 0.03
     } else {
         0.0
     };
     let coupling_penalty = if normalized_lambda > 1.0 {
-        // Gentle log penalty: log2(norm_λ) * 0.05, capped at 10%
-        (normalized_lambda.log2() * 0.05).min(0.10)
+        // Very gentle log penalty: log2(norm_λ) * 0.02, capped at 5%
+        // The coupling modifier should nudge, not dominate — zone fractions
+        // are the primary signal. λ/√N=10 → penalty = 0.066, clamped to 0.05.
+        (normalized_lambda.log2() * 0.02).min(0.05)
     } else {
         0.0
     };
-    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.90, 1.05);
+    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.95, 1.03);
 
     // === Signal penalty ===
     // Signals are architectural problems detected across layers. Instead of a separate

@@ -131,36 +131,38 @@ pub struct SpectralMetrics {
 }
 
 /// Compute spectral metrics (λ_max and eigenvector centrality) from the structural
-/// dependency graph (Import edges only, unit weights).
+/// dependency graph (Import + Calls edges, unit weights).
 ///
 /// This measures the **static topology** of the codebase — how the dependency structure
 /// alone amplifies perturbations. It does not depend on change history, time windows,
 /// or arbitrary damping parameters.
 ///
-/// Uses power iteration on the undirected adjacency matrix (each directed Import edge
+/// Uses both Import and Calls edge types because different language parsers emit
+/// different edge types (e.g., Python emits Imports, TypeScript emits Calls).
+/// Contains edges are excluded — they represent hierarchy (file→function), not coupling.
+///
+/// Uses power iteration on the undirected adjacency matrix (each directed edge
 /// becomes bidirectional with weight 1.0). By the Perron-Frobenius theorem, the
 /// dominant eigenvalue is real and positive with a non-negative eigenvector.
 ///
 /// # Performance
 /// O(edges × iterations) — typically 20-50 iterations for convergence.
 pub fn compute_spectral_metrics(graph: &UnifiedGraph) -> SpectralMetrics {
-    compute_spectral_metrics_weighted(graph, &EdgeType::Imports, false)
+    compute_spectral_metrics_multi(graph, &[EdgeType::Imports, EdgeType::Calls], false)
 }
 
-/// Compute spectral metrics from edges of a specific type.
+/// Compute spectral metrics from edges of multiple types.
 ///
 /// If `use_edge_weights` is false, all edges are treated as weight 1.0 (topology only).
-/// If true, the actual edge weights are used (e.g., co-change coupling probabilities).
-pub fn compute_spectral_metrics_weighted(
+/// If true, the actual edge weights are used.
+pub fn compute_spectral_metrics_multi(
     graph: &UnifiedGraph,
-    edge_type: &EdgeType,
+    edge_types: &[EdgeType],
     use_edge_weights: bool,
 ) -> SpectralMetrics {
     const MAX_ITER: usize = 200;
     const EPSILON: f64 = 1e-6;
 
-    // Build adjacency list (bidirectional, for undirected spectral analysis).
-    // Dense integer IDs for performance, mapped back to string IDs at the end.
     let node_ids: Vec<&str> = graph.node_ids().collect();
     let n = node_ids.len();
 
@@ -178,19 +180,54 @@ pub fn compute_spectral_metrics_weighted(
 
     let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
 
-    let edges = graph.edges_of_type(edge_type);
-    for &(src, tgt, weight) in &edges {
-        if let (Some(&si), Some(&ti)) = (id_to_idx.get(src), id_to_idx.get(tgt)) {
-            let w = if use_edge_weights { weight } else { 1.0 };
-            adj[si].push((ti, w));
-            adj[ti].push((si, w));
+    for edge_type in edge_types {
+        let edges = graph.edges_of_type(edge_type);
+        for &(src, tgt, weight) in &edges {
+            if let (Some(&si), Some(&ti)) = (id_to_idx.get(src), id_to_idx.get(tgt)) {
+                let w = if use_edge_weights { weight } else { 1.0 };
+                adj[si].push((ti, w));
+                adj[ti].push((si, w));
+            }
         }
+    }
+
+    power_iteration(&node_ids, &adj, n, MAX_ITER, EPSILON)
+}
+
+/// Compute spectral metrics from edges of a single specific type.
+///
+/// If `use_edge_weights` is false, all edges are treated as weight 1.0 (topology only).
+/// If true, the actual edge weights are used (e.g., co-change coupling probabilities).
+pub fn compute_spectral_metrics_weighted(
+    graph: &UnifiedGraph,
+    edge_type: &EdgeType,
+    use_edge_weights: bool,
+) -> SpectralMetrics {
+    compute_spectral_metrics_multi(graph, std::slice::from_ref(edge_type), use_edge_weights)
+}
+
+/// Power iteration on an undirected adjacency list.
+/// Returns `SpectralMetrics` with λ_max and eigenvector centrality.
+fn power_iteration(
+    node_ids: &[&str],
+    adj: &[Vec<(usize, f64)>],
+    n: usize,
+    max_iter: usize,
+    epsilon: f64,
+) -> SpectralMetrics {
+    if n == 0 {
+        return SpectralMetrics {
+            lambda_max: 0.0,
+            eigenvector_centrality: HashMap::new(),
+            iterations: 0,
+            converged: true,
+        };
     }
 
     // Power iteration: v_{k+1} = A * v_k / ||A * v_k||
     // λ_max ≈ ||A * v_k|| / ||v_k|| (Rayleigh quotient for dominant eigenvalue)
     //
-    // Note: For graphs where λ_max = -λ_min (e.g., bipartite/star graphs), the
+    // For graphs where λ_max = -λ_min (e.g., bipartite/star graphs), the
     // eigenvector oscillates even after lambda converges. We fix this by tracking
     // the pre-normalization vector w = A*v and using |w| for eigenvector centrality.
     let mut v: Vec<f64> = vec![1.0 / (n as f64).sqrt(); n];
@@ -199,10 +236,9 @@ pub fn compute_spectral_metrics_weighted(
     let mut converged = false;
     let mut iterations = 0;
 
-    for iter in 0..MAX_ITER {
+    for iter in 0..max_iter {
         iterations = iter + 1;
 
-        // Compute w = A * v
         let mut w: Vec<f64> = vec![0.0; n];
         for (i, neighbors) in adj.iter().enumerate() {
             for &(j, weight) in neighbors {
@@ -210,29 +246,22 @@ pub fn compute_spectral_metrics_weighted(
             }
         }
 
-        // Compute norm = ||w||
         let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
         if norm < 1e-15 {
-            // Graph is disconnected or has no edges — λ = 0
             lambda_max = 0.0;
             converged = true;
             break;
         }
 
-        // λ_max estimate = ||w|| (since ||v|| = 1 after normalization)
         let new_lambda = norm;
-
-        // Keep the raw w for eigenvector extraction
         w_final.clone_from(&w);
 
-        // Normalize: v = w / ||w||
         let inv_norm = 1.0 / norm;
         for i in 0..n {
             v[i] = w[i] * inv_norm;
         }
 
-        // Check convergence
-        if (new_lambda - lambda_max).abs() < EPSILON {
+        if (new_lambda - lambda_max).abs() < epsilon {
             lambda_max = new_lambda;
             converged = true;
             break;
@@ -240,10 +269,7 @@ pub fn compute_spectral_metrics_weighted(
         lambda_max = new_lambda;
     }
 
-    // After lambda convergence, do one final A*v to get a stable eigenvector direction.
-    // For graphs with symmetric spectrum (λ = -λ), the vector oscillates but A*v always
-    // points toward the Perron-Frobenius eigenvector (all non-negative).
-    // Use absolute values to handle any residual sign oscillation.
+    // Final A*v for stable eigenvector direction (handles bipartite oscillation).
     {
         let mut w: Vec<f64> = vec![0.0; n];
         for (i, neighbors) in adj.iter().enumerate() {
@@ -254,8 +280,6 @@ pub fn compute_spectral_metrics_weighted(
         w_final = w;
     }
 
-    // Build eigenvector centrality map (normalize to [0, 1])
-    // Use |w_final| to handle oscillation in bipartite-like graphs.
     let max_w = w_final
         .iter()
         .copied()
@@ -265,7 +289,7 @@ pub fn compute_spectral_metrics_weighted(
         node_ids
             .iter()
             .enumerate()
-            .filter(|&(i, _)| w_final[i].abs() > 1e-10) // skip near-zero entries for sparsity
+            .filter(|&(i, _)| w_final[i].abs() > 1e-10)
             .map(|(i, &id)| (id.to_string(), w_final[i].abs() / max_w))
             .collect()
     } else {
@@ -502,6 +526,24 @@ mod tests {
         assert!(
             (sm.lambda_max - 3.0_f64.sqrt()).abs() < 0.05,
             "Expected λ≈1.732 for star K_1,3, got {}",
+            sm.lambda_max
+        );
+    }
+
+    #[test]
+    fn test_spectral_includes_calls_edges() {
+        // compute_spectral_metrics should include both Import and Calls edges.
+        // Graph with only Calls edges (like TypeScript parser output) should give λ > 0.
+        let mut g = UnifiedGraph::new();
+        g.add_node(Node::module("a", "a.ts"));
+        g.add_node(Node::module("b", "b.ts"));
+        g.add_edge("a", "b", EdgeType::Calls, 1.0).unwrap();
+
+        let sm = compute_spectral_metrics(&g);
+        assert!(sm.converged);
+        assert!(
+            (sm.lambda_max - 1.0).abs() < 0.01,
+            "Expected λ=1.0 for single Calls edge, got {}",
             sm.lambda_max
         );
     }
