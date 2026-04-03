@@ -59,11 +59,10 @@ fn collect_maxes_for_type(graph: &UnifiedGraph, node_type: NodeType) -> GraphMax
         max_coupling = max_coupling.max((metrics.fan_in + metrics.fan_out) as f64);
 
         if let Some(cm) = graph.change_metrics.get(node_id) {
+            // Spec 047: weight defect churn 3× higher than feature churn.
+            // Falls back to change_freq * churn_rate when no classification data.
             let pressure = if cm.defect_churn > 0 || cm.feature_churn > 0 {
-                let defect_pressure = cm.defect_churn as f64 * 3.0;
-                let feature_pressure = cm.feature_churn as f64;
-                (cm.change_freq as f64 / cm.churn_lines.max(1) as f64)
-                    * (defect_pressure + feature_pressure)
+                cm.defect_churn as f64 * 3.0 + cm.feature_churn as f64
             } else {
                 cm.change_freq as f64 * cm.churn_rate
             };
@@ -91,13 +90,10 @@ fn compute_change_load(
         Some(cm) => cm,
         None => return 0.0,
     };
-    // Weight defect churn 3x higher than feature churn.
-    // If no churn classification data, fall back to total churn.
+    // Spec 047: weight defect churn 3× higher than feature churn.
+    // Falls back to change_freq * churn_rate (≈ churn_lines) when no classification data.
     let raw = if cm.defect_churn > 0 || cm.feature_churn > 0 {
-        let defect_pressure = cm.defect_churn as f64 * 3.0;
-        let feature_pressure = cm.feature_churn as f64;
-        (cm.change_freq as f64 / cm.churn_lines.max(1) as f64)
-            * (defect_pressure + feature_pressure)
+        cm.defect_churn as f64 * 3.0 + cm.feature_churn as f64
     } else {
         cm.change_freq as f64 * cm.churn_rate
     };
