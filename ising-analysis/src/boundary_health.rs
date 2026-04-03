@@ -7,9 +7,11 @@
 use ising_core::boundary::BoundaryStructure;
 use ising_core::fea::{BoundaryHealth, BoundaryHealthReport, NodeRisk, SafetyZone};
 use ising_core::graph::{EdgeType, UnifiedGraph};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Compute boundary health metrics for all detected modules.
+///
+/// Uses a single-pass edge pre-indexing strategy to avoid O(modules × edges).
 pub fn compute_boundary_health(
     graph: &UnifiedGraph,
     boundaries: &BoundaryStructure,
@@ -19,7 +21,7 @@ pub fn compute_boundary_health(
     let risk_map: HashMap<&str, &NodeRisk> =
         risk_nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
 
-    // Collect all unique modules
+    // Collect all unique modules and their members
     let mut module_members: HashMap<(String, String), Vec<String>> = HashMap::new();
     for (node_id, (pkg, module)) in &boundaries.assignments {
         module_members
@@ -28,31 +30,80 @@ pub fn compute_boundary_health(
             .push(node_id.clone());
     }
 
-    // Get co-change and import edges
+    // Build node → module key lookup for O(1) module membership checks
+    let node_module: HashMap<&str, (&str, &str)> = boundaries
+        .assignments
+        .iter()
+        .map(|(id, (pkg, m))| (id.as_str(), (pkg.as_str(), m.as_str())))
+        .collect();
+
+    // Pre-index edge counts per module in a single pass over edges.
+    // For each module: (total_change_edges, internal_change_edges, total_struct, cross_struct)
+    type ModKey = (String, String);
+    let mut change_counts: HashMap<ModKey, (usize, usize)> = HashMap::new();
+    let mut struct_counts: HashMap<ModKey, (usize, usize)> = HashMap::new();
+
     let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
+    for &(a, b, _) in &co_change_edges {
+        let mod_a = node_module.get(a);
+        let mod_b = node_module.get(b);
+        let same_mod = matches!((mod_a, mod_b), (Some(ma), Some(mb)) if ma == mb);
+
+        if let Some(&(pkg, m)) = mod_a {
+            let entry = change_counts
+                .entry((pkg.to_string(), m.to_string()))
+                .or_insert((0, 0));
+            entry.0 += 1;
+            if same_mod {
+                entry.1 += 1;
+            }
+        }
+        // Only count for b's module if a and b are in different modules
+        // (if same module, already counted above)
+        if let Some(&(pkg, m)) = mod_b
+            && !same_mod
+        {
+            let entry = change_counts
+                .entry((pkg.to_string(), m.to_string()))
+                .or_insert((0, 0));
+            entry.0 += 1;
+        }
+    }
+
     let import_edges = graph.edges_of_type(&EdgeType::Imports);
+    for &(a, b, _) in &import_edges {
+        let mod_a = node_module.get(a);
+        let mod_b = node_module.get(b);
+        let same_mod = matches!((mod_a, mod_b), (Some(ma), Some(mb)) if ma == mb);
+
+        if let Some(&(pkg, m)) = mod_a {
+            let entry = struct_counts
+                .entry((pkg.to_string(), m.to_string()))
+                .or_insert((0, 0));
+            entry.0 += 1;
+            if !same_mod {
+                entry.1 += 1;
+            }
+        }
+        if let Some(&(pkg, m)) = mod_b
+            && !same_mod
+        {
+            let entry = struct_counts
+                .entry((pkg.to_string(), m.to_string()))
+                .or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += 1;
+        }
+    }
 
     let mut modules = Vec::new();
 
     for ((pkg, module), members) in &module_members {
-        let member_set: HashSet<&str> = members.iter().map(|s| s.as_str()).collect();
+        let key = (pkg.clone(), module.clone());
 
         // --- Containment ratio ---
-        // What fraction of this module's co-change edges stay within the module?
-        let mut total_change_edges = 0usize;
-        let mut internal_change_edges = 0usize;
-
-        for &(a, b, _) in &co_change_edges {
-            let a_in = member_set.contains(a);
-            let b_in = member_set.contains(b);
-            if a_in || b_in {
-                total_change_edges += 1;
-                if a_in && b_in {
-                    internal_change_edges += 1;
-                }
-            }
-        }
-
+        let (total_change_edges, internal_change_edges) =
+            change_counts.get(&key).copied().unwrap_or((0, 0));
         let containment_ratio = if total_change_edges > 0 {
             internal_change_edges as f64 / total_change_edges as f64
         } else {
@@ -60,21 +111,8 @@ pub fn compute_boundary_health(
         };
 
         // --- Coupling ratio ---
-        // Cross-boundary structural edges / total structural edges
-        let mut total_structural = 0usize;
-        let mut cross_structural = 0usize;
-
-        for &(a, b, _) in &import_edges {
-            let a_in = member_set.contains(a);
-            let b_in = member_set.contains(b);
-            if a_in || b_in {
-                total_structural += 1;
-                if (a_in && !b_in) || (!a_in && b_in) {
-                    cross_structural += 1;
-                }
-            }
-        }
-
+        let (total_structural, cross_structural) =
+            struct_counts.get(&key).copied().unwrap_or((0, 0));
         let coupling_ratio = if total_structural > 0 {
             cross_structural as f64 / total_structural as f64
         } else {

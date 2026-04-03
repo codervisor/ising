@@ -18,26 +18,31 @@ use std::path::Path;
 pub enum BoundarySource {
     /// Auto-detected from build manifests (Cargo.toml, package.json, etc.)
     Manifest { ecosystem: String },
-    /// Fallback: directory prefix grouping
+    /// Fallback: directory prefix grouping (reserved for future L1 directory detection)
     Directory,
     /// Single root (no workspace detected)
     SingleRoot,
 }
 
 /// How a Level 2 (intra-package) module was detected.
+///
+/// Note: Current implementation uses directory-based grouping for all languages,
+/// labeled by the dominant language. Future work: validate Python directories
+/// contain `__init__.py`, check TS/JS directories for barrel files (`index.ts`),
+/// parse Rust `mod` declarations, etc. See spec 046 Phase 1.3 for the full plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleDetection {
-    /// Python `__init__.py` directory
+    /// Python directory (future: validate `__init__.py` presence)
     PythonPackage,
-    /// Go package directory
+    /// Go package directory (each dir with .go files)
     GoPackage,
     /// Java package directory
     JavaPackage,
-    /// TS/JS barrel file (index.ts/index.js)
+    /// TS/JS directory (future: validate barrel file presence)
     BarrelFile,
     /// C# directory with .cs files
     CSharpNamespace,
-    /// Directory grouping fallback
+    /// Directory grouping fallback (no language-specific detection)
     Directory,
 }
 
@@ -122,27 +127,28 @@ impl BoundaryStructure {
             pkg.modules = detect_intra_package_modules(&pkg_members, &pkg.root_path);
         }
 
-        // Build assignments map
+        // Build assignments map using a reverse index from module members.
+        // This avoids O(N × modules × members) scanning.
         let mut assignments = HashMap::new();
         let mut uncategorized = Vec::new();
 
-        for node_id in node_ids {
-            let mut assigned = false;
-            for pkg in &packages {
-                for module in &pkg.modules {
-                    if module.members.iter().any(|m| m == *node_id) {
-                        assignments
-                            .insert(node_id.to_string(), (pkg.id.clone(), module.id.clone()));
-                        assigned = true;
-                        break;
-                    }
-                }
-                if assigned {
-                    break;
+        // First pass: build reverse index from member → (pkg_id, module_id)
+        let mut member_index: HashMap<&str, (String, String)> = HashMap::new();
+        for pkg in &packages {
+            for module in &pkg.modules {
+                for member in &module.members {
+                    member_index.insert(member.as_str(), (pkg.id.clone(), module.id.clone()));
                 }
             }
-            if !assigned {
-                // Check if it belongs to a package but no specific module
+        }
+
+        // Second pass: assign each node using the index
+        for node_id in node_ids {
+            if let Some((pkg_id, mod_id)) = member_index.get(node_id) {
+                assignments.insert(node_id.to_string(), (pkg_id.clone(), mod_id.clone()));
+            } else {
+                // Not in any module — check if it belongs to a package root
+                let mut assigned = false;
                 for pkg in &packages {
                     if node_belongs_to_package(node_id, &pkg.root_path, &l1_source) {
                         assignments
@@ -151,13 +157,13 @@ impl BoundaryStructure {
                         break;
                     }
                 }
-            }
-            if !assigned {
-                uncategorized.push(node_id.to_string());
-                assignments.insert(
-                    node_id.to_string(),
-                    ("_uncategorized".to_string(), "_uncategorized".to_string()),
-                );
+                if !assigned {
+                    uncategorized.push(node_id.to_string());
+                    assignments.insert(
+                        node_id.to_string(),
+                        ("_uncategorized".to_string(), "_uncategorized".to_string()),
+                    );
+                }
             }
         }
 
@@ -170,15 +176,24 @@ impl BoundaryStructure {
     }
 
     /// Are two nodes in the same Level 2 module?
+    ///
+    /// Returns false if either node is not assigned to any module,
+    /// so unknown/uncategorized nodes are never treated as same-module.
     pub fn same_module(&self, a: &str, b: &str) -> bool {
-        self.assignments.get(a) == self.assignments.get(b)
+        matches!(
+            (self.assignments.get(a), self.assignments.get(b)),
+            (Some(left), Some(right)) if left == right
+        )
     }
 
     /// Are two nodes in the same Level 1 package?
+    ///
+    /// Returns false if either node is not assigned.
     pub fn same_package(&self, a: &str, b: &str) -> bool {
-        let pkg_a = self.assignments.get(a).map(|(p, _)| p);
-        let pkg_b = self.assignments.get(b).map(|(p, _)| p);
-        pkg_a == pkg_b
+        matches!(
+            (self.assignments.get(a), self.assignments.get(b)),
+            (Some((pkg_a, _)), Some((pkg_b, _))) if pkg_a == pkg_b
+        )
     }
 
     /// Classify the boundary crossing type for a pair of nodes.
@@ -654,13 +669,17 @@ fn parse_sln_projects(content: &str) -> Vec<PackageInfo> {
 // ============================================================================
 
 /// Check if a node belongs to a package based on its file path prefix.
+///
+/// Uses `Path::starts_with` to ensure component-boundary matching:
+/// "pkg" matches "pkg/foo.rs" but not "pkg2/foo.rs" or "pkg-old/foo.rs".
 fn node_belongs_to_package(node_id: &str, root_path: &str, _source: &BoundarySource) -> bool {
     if root_path.is_empty() {
         // Single root: everything belongs
         return true;
     }
-    // Node path should start with the package root
-    node_id.starts_with(root_path) || node_id.starts_with(&format!("{}/", root_path))
+    let node_path = Path::new(node_id);
+    let root = Path::new(root_path);
+    node_path == root || node_path.starts_with(root)
 }
 
 /// Detect Level 2 modules within a single package.
@@ -807,7 +826,10 @@ fn csharp_module_dir(rel_path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Fallback: group by first directory component.
+/// Fallback: group by parent directory path.
+///
+/// Files in the same directory are grouped together. Root-level files
+/// (no directory component) go into the default module.
 fn directory_module_dir(rel_path: &str) -> String {
     rel_path
         .rsplit_once('/')

@@ -203,6 +203,39 @@ fn detect_ghost_coupling(
                 continue; // SameModule → suppress
             }
 
+            // Even for cross-boundary pairs, apply common-parent suppression.
+            // Files orchestrated by a shared parent co-change for legitimate
+            // reasons even across module boundaries.
+            let empty = std::collections::HashSet::new();
+            let importers_a = importers.get(a).unwrap_or(&empty);
+            let importers_b = importers.get(b).unwrap_or(&empty);
+            let shared_parents: Vec<&&str> = importers_a.intersection(importers_b).collect();
+            let has_shared_parent = !shared_parents.is_empty() || is_cross_crate_pair(a, b);
+
+            if has_shared_parent {
+                // Suppress unless coupling is very high (≥0.9)
+                if *coupling >= 0.9 {
+                    let parent_names: Vec<&str> = shared_parents.iter().map(|s| **s).collect();
+                    let parent_desc = if parent_names.is_empty() {
+                        "workspace orchestration".to_string()
+                    } else {
+                        parent_names.join(", ")
+                    };
+                    signals.push(Signal::new(
+                        SignalType::GhostCoupling,
+                        a,
+                        Some(b),
+                        *coupling * 0.3 * mult,
+                        format!(
+                            "No structural dependency, but {:.0}% co-change rate. Co-change likely explained by shared parent {}, but coupling is very high.",
+                            coupling * 100.0,
+                            parent_desc
+                        ),
+                    ));
+                }
+                continue;
+            }
+
             let (pkg_a, mod_a) = bs.module_of(a);
             let (pkg_b, mod_b) = bs.module_of(b);
 

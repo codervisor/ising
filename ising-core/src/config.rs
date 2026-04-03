@@ -117,6 +117,7 @@ pub struct FeaConfig {
     pub max_iterations: usize,
     /// Attenuation factor for risk crossing module boundaries (0.0–1.0).
     /// Default 0.3: risk propagates at 30% when crossing a boundary.
+    /// Clamped to [0.0, 1.0] to prevent breaking propagation convergence.
     #[serde(default = "default_boundary_attenuation")]
     pub boundary_attenuation: f64,
 }
@@ -258,8 +259,10 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, crate::IsingError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| crate::IsingError::ConfigFile(format!("{path:?}: {e}")))?;
-        toml::from_str(&content)
-            .map_err(|e| crate::IsingError::ConfigFile(format!("{path:?}: {e}")))
+        let mut config: Self = toml::from_str(&content)
+            .map_err(|e| crate::IsingError::ConfigFile(format!("{path:?}: {e}")))?;
+        config.fea.boundary_attenuation = config.fea.boundary_attenuation.clamp(0.0, 1.0);
+        Ok(config)
     }
 
     /// Load config from a path if it exists, otherwise return defaults.

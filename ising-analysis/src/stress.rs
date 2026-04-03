@@ -136,7 +136,8 @@ fn build_adjacency<'a>(
     boundaries: Option<&BoundaryStructure>,
 ) -> HashMap<&'a str, Vec<(&'a str, f64)>> {
     let mut neighbors: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
-    let attenuation = config.fea.boundary_attenuation;
+    // Clamp attenuation to [0, 1] as defense-in-depth (also validated at config load).
+    let attenuation = config.fea.boundary_attenuation.clamp(0.0, 1.0);
 
     // Co-change edges (bidirectional, higher damping)
     let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
@@ -850,18 +851,19 @@ fn compute_health_index(
 
     // === Boundary health score ===
     // When boundary health is available, incorporate containment into scoring.
-    // boundary_health_score = avg_containment, which measures how well risk is
-    // contained within module boundaries (1.0 = perfect, 0.0 = all leaks).
-    let boundary_health_score = boundary_health.map(|bh| bh.avg_containment).unwrap_or(0.0);
+    // avg_containment measures how well risk is contained within module boundaries
+    // (1.0 = perfect, 0.0 = all leaks). When not computed, default to 1.0 (neutral).
+    let boundary_health_score = boundary_health.map(|bh| bh.avg_containment).unwrap_or(1.0);
 
     // === Final score ===
     // When boundary health is available:
-    //   score = boundary_health_score × zone_sub_score × coupling_modifier - signal_penalty
+    //   containment_modifier = 0.85 + 0.15 × avg_containment  (range [0.85, 1.0])
+    //   score = zone_sub_score × coupling_modifier × containment_modifier − signal_penalty
     // Otherwise (legacy):
-    //   score = zone_sub_score * coupling_modifier - signal_penalty
+    //   score = zone_sub_score × coupling_modifier − signal_penalty
     let score = if let Some(bh) = boundary_health {
-        // Blend boundary health with zone score: boundary containment acts as a modifier
-        // High containment (>0.8) gives a bonus, low containment (<0.5) penalizes
+        // Containment modifier: maps avg_containment [0, 1] to [0.85, 1.0].
+        // High containment (>0.8) is nearly neutral; low containment (<0.5) penalizes up to 15%.
         let containment_modifier = 0.85 + 0.15 * bh.avg_containment;
         (zone_sub_score * coupling_modifier * containment_modifier - signal_penalty).clamp(0.0, 1.0)
     } else {
