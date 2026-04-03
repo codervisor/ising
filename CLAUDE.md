@@ -171,14 +171,13 @@ After fixing bugs in parsers, the risk model, health index, or signal detection:
    cargo fmt --check              # Clean formatting
    ```
 
-2. **Run the OSS benchmark** to check for regressions and verify the fix's impact:
+2. **Run the full OSS benchmark** to check for regressions and verify the fix's impact:
    ```bash
-   ./scripts/bench-oss-repos.sh   # Auto-clones missing repos
+   ./scripts/bench-oss-repos.sh --repos-dir /tmp/oss-repos --output /tmp/oss-bench-results
    ```
-   - If the full 29-repo benchmark is not feasible, run at minimum these 5 repos manually:
-     **flask** (small-repo bias), **gin** (Go calibration target, must be >= B),
-     **express** (small JS baseline), **django-rest-framework** (medium Python),
-     **fastapi** (large Python). These cover small/medium/large and multiple languages.
+   **MANDATORY: Always run against ALL 28 repos. Never run a subset.**
+   The script auto-clones missing repos. All 28 must pass. There is no "minimum set" fallback —
+   partial benchmarks miss cross-repo regressions (e.g., a fix that helps flask but breaks gin).
    - Compare results against `specs/042-oss-validation-round5-expanded/README.md`.
    - If a fix targets a specific repo (e.g., flask small-repo bias), verify that repo's grade changed as expected without regressing others.
 
