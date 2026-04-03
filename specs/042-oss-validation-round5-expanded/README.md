@@ -59,9 +59,14 @@ Run this script:
 - After adding or modifying language parsers
 - Before any release
 
-See also: **Post-Fix Verification SOP** in `CLAUDE.md` for the mandatory minimum 5-repo
-validation set (flask, gin, express, django-rest-framework, fastapi) when the full benchmark
-is not feasible.
+See also: **Post-Fix Verification SOP** in `CLAUDE.md` — always run all 28 repos.
+
+## Spec 047 — Scoring Formula Redesign (2026-04-03)
+
+See [../047-scoring-formula-redesign/RESULTS.md](../047-scoring-formula-redesign/RESULTS.md) for full
+results. Key changes: fully multiplicative formula, defect churn separation, widened modifier
+ranges, adaptive signal curve, Basel II/Moody's-inspired tail risk cap. Grade distribution:
+A=11, B=14, C=3, D=0 (was A=14, B=7, C=4, D=3 in Round 6). All calibration targets pass.
 
 ## Round 6 — Scoring Redesign: Zone Fractions + λ_max (2026-04-02)
 
