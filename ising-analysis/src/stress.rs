@@ -4,10 +4,11 @@
 //! Uses influence propagation along both co-change and structural edges.
 
 use crate::signals::SignalSummary;
+use ising_core::boundary::BoundaryStructure;
 use ising_core::config::Config;
 use ising_core::fea::{
-    HealthIndex, LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta, RiskField, RiskTier,
-    SafetyZone,
+    BoundaryHealthReport, HealthIndex, LoadCase, LoadPoint, NodeRisk, NodeRiskDelta, RiskDelta,
+    RiskField, RiskTier, SafetyZone,
 };
 use ising_core::graph::{EdgeType, NodeType, UnifiedGraph};
 use ising_core::metrics::{compute_node_metrics, compute_spectral_metrics, normalize};
@@ -126,16 +127,30 @@ fn compute_capacity(graph: &UnifiedGraph, node_id: &str, maxes: &GraphMaxes) -> 
 }
 
 /// Build adjacency list from both CoChanges and structural edges.
+///
+/// When boundaries are provided, edges crossing module boundaries are
+/// attenuated by `config.fea.boundary_attenuation` (default 0.3).
 fn build_adjacency<'a>(
     graph: &'a UnifiedGraph,
     config: &Config,
+    boundaries: Option<&BoundaryStructure>,
 ) -> HashMap<&'a str, Vec<(&'a str, f64)>> {
     let mut neighbors: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+    let attenuation = config.fea.boundary_attenuation;
 
     // Co-change edges (bidirectional, higher damping)
     let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
     for &(src, tgt, weight) in &co_change_edges {
-        let w = weight * config.fea.cochange_damping;
+        let boundary_factor = if let Some(bs) = boundaries {
+            if bs.crosses_boundary(src, tgt) {
+                attenuation
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+        let w = weight * config.fea.cochange_damping * boundary_factor;
         neighbors.entry(src).or_default().push((tgt, w));
         neighbors.entry(tgt).or_default().push((src, w));
     }
@@ -143,7 +158,16 @@ fn build_adjacency<'a>(
     // Structural import edges (bidirectional for risk propagation, lower damping)
     let import_edges = graph.edges_of_type(&EdgeType::Imports);
     for &(src, tgt, weight) in &import_edges {
-        let w = weight * config.fea.structural_damping;
+        let boundary_factor = if let Some(bs) = boundaries {
+            if bs.crosses_boundary(src, tgt) {
+                attenuation
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+        let w = weight * config.fea.structural_damping * boundary_factor;
         neighbors.entry(src).or_default().push((tgt, w));
         neighbors.entry(tgt).or_default().push((src, w));
     }
@@ -164,10 +188,11 @@ fn propagate_risk(
     graph: &UnifiedGraph,
     local_loads: &HashMap<String, f64>,
     config: &Config,
+    boundaries: Option<&BoundaryStructure>,
 ) -> (HashMap<String, f64>, usize, bool) {
     let epsilon = config.fea.epsilon;
     let max_iter = config.fea.max_iterations;
-    let raw_neighbors = build_adjacency(graph, config);
+    let raw_neighbors = build_adjacency(graph, config, boundaries);
 
     // Normalize weights per node so incoming influence sums to at most MAX_SPECTRAL_RADIUS.
     // Keeping the spectral radius strictly < 1 ensures the Jacobi iteration contracts.
@@ -229,12 +254,23 @@ fn propagate_risk(
 ///
 /// If `signal_summary` is provided, it's incorporated into the health index
 /// to produce a signal-aware grade. Without it, only change-risk is used.
+///
+/// If `boundary_health` is provided, the health index uses boundary-aware scoring.
 pub fn compute_risk_field(
     graph: &UnifiedGraph,
     config: &Config,
     signal_summary: Option<&SignalSummary>,
+    boundaries: Option<&BoundaryStructure>,
+    boundary_health: Option<&BoundaryHealthReport>,
 ) -> RiskField {
-    let mut field = compute_risk_field_with_loads(graph, config, &HashMap::new(), signal_summary);
+    let mut field = compute_risk_field_with_loads(
+        graph,
+        config,
+        &HashMap::new(),
+        signal_summary,
+        boundaries,
+        boundary_health,
+    );
     // Add function-level risk entries (separate normalization and tier assignment)
     compute_function_risks(graph, config, &mut field);
     field
@@ -246,6 +282,8 @@ fn compute_risk_field_with_loads(
     config: &Config,
     pressure_multipliers: &HashMap<String, f64>,
     signal_summary: Option<&SignalSummary>,
+    boundaries: Option<&BoundaryStructure>,
+    boundary_health: Option<&BoundaryHealthReport>,
 ) -> RiskField {
     let maxes = collect_maxes(graph);
 
@@ -276,8 +314,9 @@ fn compute_risk_field_with_loads(
         structural_weights.insert(node_id.clone(), weight);
     }
 
-    // Propagate risk through coupling graph
-    let (propagated, iterations, converged) = propagate_risk(graph, &local_loads, config);
+    // Propagate risk through coupling graph (boundary-aware if boundaries provided)
+    let (propagated, iterations, converged) =
+        propagate_risk(graph, &local_loads, config, boundaries);
 
     // Build final NodeRisk results
     let mut nodes: Vec<NodeRisk> = Vec::with_capacity(module_ids.len());
@@ -334,7 +373,12 @@ fn compute_risk_field_with_loads(
     // Compute aggregate health index.
     let default_summary = SignalSummary::default();
     let summary = signal_summary.unwrap_or(&default_summary);
-    let health = Some(compute_health_index(&nodes, summary, graph));
+    let health = Some(compute_health_index(
+        &nodes,
+        summary,
+        graph,
+        boundary_health,
+    ));
 
     // Sort by direct_score descending (highest risk first) for the primary ranking.
     // This replaces the old SF-ascending sort which was dominated by propagation.
@@ -533,7 +577,7 @@ pub fn simulate_load_case(
         .iter()
         .map(|lp| (lp.node_id.clone(), lp.pressure))
         .collect();
-    compute_risk_field_with_loads(graph, config, &multipliers, None)
+    compute_risk_field_with_loads(graph, config, &multipliers, None, None, None)
 }
 
 /// Compare two risk fields to produce per-node deltas.
@@ -648,6 +692,7 @@ fn compute_health_index(
     nodes: &[NodeRisk],
     signals: &SignalSummary,
     graph: &UnifiedGraph,
+    boundary_health: Option<&BoundaryHealthReport>,
 ) -> HealthIndex {
     let total_modules = nodes.len();
     let active: Vec<&NodeRisk> = nodes.iter().filter(|n| n.change_load > 0.0).collect();
@@ -686,6 +731,7 @@ fn compute_health_index(
             risk_sub_score: 1.0,
             signal_sub_score: 1.0,
             structural_sub_score: 1.0,
+            boundary_health_score: 1.0,
             caveats,
         };
     }
@@ -802,9 +848,25 @@ fn compute_health_index(
     let signal_penalty =
         (0.25 * weighted_signal_score / (weighted_signal_score + 3.0)).clamp(0.0, 0.25);
 
+    // === Boundary health score ===
+    // When boundary health is available, incorporate containment into scoring.
+    // boundary_health_score = avg_containment, which measures how well risk is
+    // contained within module boundaries (1.0 = perfect, 0.0 = all leaks).
+    let boundary_health_score = boundary_health.map(|bh| bh.avg_containment).unwrap_or(0.0);
+
     // === Final score ===
-    // score = zone_sub_score * coupling_modifier - signal_penalty
-    let score = (zone_sub_score * coupling_modifier - signal_penalty).clamp(0.0, 1.0);
+    // When boundary health is available:
+    //   score = boundary_health_score × zone_sub_score × coupling_modifier - signal_penalty
+    // Otherwise (legacy):
+    //   score = zone_sub_score * coupling_modifier - signal_penalty
+    let score = if let Some(bh) = boundary_health {
+        // Blend boundary health with zone score: boundary containment acts as a modifier
+        // High containment (>0.8) gives a bonus, low containment (<0.5) penalizes
+        let containment_modifier = 0.85 + 0.15 * bh.avg_containment;
+        (zone_sub_score * coupling_modifier * containment_modifier - signal_penalty).clamp(0.0, 1.0)
+    } else {
+        (zone_sub_score * coupling_modifier - signal_penalty).clamp(0.0, 1.0)
+    };
 
     let grade = if score >= 0.85 {
         "A"
@@ -921,6 +983,7 @@ fn compute_health_index(
         risk_sub_score,
         signal_sub_score,
         structural_sub_score,
+        boundary_health_score,
         caveats,
     }
 }
@@ -1051,7 +1114,7 @@ mod tests {
     fn test_risk_field_ordering() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         // a.py should have lowest SF (highest risk): most change + most complex
         assert_eq!(field.nodes[0].node_id, "a.py");
@@ -1066,7 +1129,7 @@ mod tests {
     fn test_no_change_module_safe() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         // c.py has no change data → change_load = 0, risk ≈ propagated only
         let c = field.nodes.iter().find(|n| n.node_id == "c.py").unwrap();
@@ -1080,7 +1143,7 @@ mod tests {
     fn test_propagation_converges() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         assert!(field.converged);
         assert!(field.iterations > 0);
@@ -1090,7 +1153,7 @@ mod tests {
     fn test_propagation_adds_risk() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         // b.py should have propagated risk from a.py (via CoChanges + Imports)
         let b = field.nodes.iter().find(|n| n.node_id == "b.py").unwrap();
@@ -1119,7 +1182,7 @@ mod tests {
         );
 
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         assert!(field.converged);
         assert_eq!(field.nodes.len(), 1);
@@ -1133,7 +1196,7 @@ mod tests {
         let g = make_test_graph();
         let config = Config::default();
 
-        let baseline = compute_risk_field(&g, &config, None);
+        let baseline = compute_risk_field(&g, &config, None, None, None);
         let load = LoadCase {
             name: "test".to_string(),
             loads: vec![LoadPoint {
@@ -1158,7 +1221,7 @@ mod tests {
         let g = make_test_graph();
         let config = Config::default();
 
-        let before = compute_risk_field(&g, &config, None);
+        let before = compute_risk_field(&g, &config, None, None, None);
         let load = LoadCase {
             name: "test".to_string(),
             loads: vec![LoadPoint {
@@ -1260,7 +1323,7 @@ mod tests {
         );
 
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         // Should have 1 module + 2 function nodes
         assert_eq!(field.nodes.len(), 3, "Should have 1 module + 2 functions");
@@ -1294,7 +1357,7 @@ mod tests {
     fn test_function_risks_not_added_without_functions() {
         let g = make_test_graph();
         let config = Config::default();
-        let field = compute_risk_field(&g, &config, None);
+        let field = compute_risk_field(&g, &config, None, None, None);
 
         // make_test_graph only has modules, no functions
         assert_eq!(field.nodes.len(), 3, "Should only have 3 module nodes");
