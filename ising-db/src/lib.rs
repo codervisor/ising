@@ -94,6 +94,7 @@ pub struct StoredHealth {
     pub risk_sub_score: f64,
     pub signal_sub_score: f64,
     pub structural_sub_score: f64,
+    pub boundary_health_score: f64,
     pub caveats: Vec<String>,
 }
 
@@ -106,6 +107,7 @@ impl Database {
     /// Open (or create) the database at the given path and initialize schema.
     pub fn open(path: &str) -> Result<Self, DbError> {
         let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)
@@ -114,6 +116,7 @@ impl Database {
     /// Open an in-memory database (for testing).
     pub fn open_in_memory() -> Result<Self, DbError> {
         let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
         let db = Self { conn };
         db.init_schema()?;
         Ok(db)

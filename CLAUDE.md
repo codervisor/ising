@@ -39,7 +39,7 @@ When working on risk analysis, these are the critical files:
 ## Risk Model (How It Works)
 
 Each module gets:
-1. **change_load** [0, 1+] -- `normalize(change_freq * churn_rate)` against graph max
+1. **change_load** [0, 1+] -- `normalize(defect_churn*3 + feature_churn)` against graph max (falls back to `change_freq * churn_rate` when no classification data)
 2. **capacity** [0.05, 1.0] -- `1.0 - (complexity*0.4 + instability*0.3 + coupling*0.3)`
 3. **propagated_risk** -- from neighbors via Jacobi iteration on co-change + import edges
 4. **risk_score** -- `change_load + propagated_risk`
@@ -52,15 +52,16 @@ Propagation normalizes per-node incoming weights to sum <= 0.95, ensuring conver
 
 ## Health Index
 
-FEA-aligned scoring using safety factor zone fractions, structural coupling (λ_max), and signal penalty (see `compute_health_index` in `stress.rs`):
+FEA-aligned scoring using safety factor zone fractions, structural coupling (λ_max), boundary containment, and signal penalty (see `compute_health_index` in `stress.rs`):
 
-**Formula**: `score = zone_sub_score × coupling_modifier − signal_penalty`
+**Formula** (spec 047, fully multiplicative): `score = zone_sub_score × coupling_modifier × containment_modifier × signal_factor`
 
 | Component | Formula | Range |
 |-----------|---------|-------|
 | Zone sub-score | Weighted avg: Stable×1.0 + Healthy×0.90 + Warning×0.65 + Danger×0.35 + Critical×0.15, with small-sample blend toward 0.75 prior for <50 active modules | [0, 1] |
-| Coupling modifier | Uses normalized λ (λ/√N). norm<1: `1.0 + (1−norm)×0.05`, norm>1: `1.0 − log₂(norm)×0.05` (clamped [0.90, 1.05]) | [0.90, 1.05] |
-| Signal penalty | `0.25 × weighted_signals / (weighted_signals + 3.0)`, sigmoid saturation | [0, 0.25] |
+| Coupling modifier | Uses normalized λ (λ/√N). norm<1: `1.0 + (1−norm)×0.05`, norm>1: `1.0 − log₂(norm)×0.05` (clamped [0.85, 1.05]) | [0.85, 1.05] |
+| Containment modifier | `0.70 + 0.35 × avg_containment` (clamped [0.70, 1.05]). Only applied when boundary health is computed. | [0.70, 1.05] |
+| Signal factor | `1.0 − signal_penalty`. Penalty uses adaptive piecewise curve: x≤5: `0.25×x/(x+3)`, x>5: `0.156 + 0.094×log₂(x/5)` (cap 0.30) | [0.70, 1.0] |
 
 **λ_max** (spectral radius of structural Import graph, unit weights):
 - Raw λ_max is always >>1 for real codebases (hub modules with many imports)
