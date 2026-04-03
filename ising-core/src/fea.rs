@@ -239,7 +239,9 @@ pub struct HealthIndex {
 /// Per-module boundary health metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoundaryHealth {
-    /// Module identifier (package_id::module_id).
+    /// Module identifier.
+    /// Usually formatted as `package_id::module_id`; for the package root (`_root`),
+    /// current producers emit just `package_id`.
     pub module_id: String,
     /// Number of files in this module.
     pub member_count: usize,
