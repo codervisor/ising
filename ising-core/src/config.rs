@@ -115,6 +115,10 @@ pub struct FeaConfig {
     /// Maximum propagation iterations.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// Attenuation factor for risk crossing module boundaries (0.0–1.0).
+    /// Default 0.3: risk propagates at 30% when crossing a boundary.
+    #[serde(default = "default_boundary_attenuation")]
+    pub boundary_attenuation: f64,
 }
 
 impl Default for FeaConfig {
@@ -124,6 +128,7 @@ impl Default for FeaConfig {
             structural_damping: default_structural_damping(),
             epsilon: default_epsilon(),
             max_iterations: default_max_iterations(),
+            boundary_attenuation: default_boundary_attenuation(),
         }
     }
 }
@@ -139,6 +144,9 @@ fn default_epsilon() -> f64 {
 }
 fn default_max_iterations() -> usize {
     100
+}
+fn default_boundary_attenuation() -> f64 {
+    0.3
 }
 
 fn default_time_window() -> String {

@@ -3,6 +3,7 @@
 //! Each signal is a comparison between layers that reveals patterns invisible
 //! from any single layer alone.
 
+use ising_core::boundary::{BoundaryStructure, CrossingType, severity_multiplier};
 use ising_core::config::{Config, ThresholdConfig};
 use ising_core::graph::{EdgeLayer, EdgeType, UnifiedGraph};
 use ising_core::metrics::{compute_node_metrics, percentile};
@@ -43,6 +44,8 @@ pub enum SignalType {
     StaleCode,
     /// Function churns far more than siblings in the same file — intra-file hotspot.
     IntraFileHotspot,
+    /// Module has high cross-boundary temporal coupling — boundary leakage.
+    BoundaryLeakage,
 }
 
 impl SignalType {
@@ -62,6 +65,7 @@ impl SignalType {
             SignalType::DeprecatedUsage => "high",
             SignalType::StaleCode => "info",
             SignalType::IntraFileHotspot => "high",
+            SignalType::BoundaryLeakage => "high",
         }
     }
 }
@@ -95,7 +99,17 @@ impl Signal {
 }
 
 /// Detect all cross-layer signals in the unified graph.
-pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
+///
+/// If `boundaries` is provided, signals are boundary-aware:
+/// - Ghost coupling only fires on cross-boundary pairs
+/// - Unnecessary abstraction skips cross-boundary wrappers
+/// - Fragile boundary severity scaled by crossing type
+/// - Boundary leakage detection enabled
+pub fn detect_signals(
+    graph: &UnifiedGraph,
+    config: &Config,
+    boundaries: Option<&BoundaryStructure>,
+) -> Vec<Signal> {
     let co_change_edges = graph.edges_of_type(&EdgeType::CoChanges);
     let import_edges = graph.edges_of_type(&EdgeType::Imports);
     let node_ids: Vec<String> = graph.node_ids().map(|s| s.to_string()).collect();
@@ -106,16 +120,19 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
         &import_edges,
         graph,
         &config.thresholds,
+        boundaries,
     ));
     signals.extend(detect_fragile_boundaries(
         &co_change_edges,
         graph,
         &config.thresholds,
+        boundaries,
     ));
     signals.extend(detect_unnecessary_abstraction(
         &import_edges,
         graph,
         &config.thresholds,
+        boundaries,
     ));
     signals.extend(detect_stable_cores(&node_ids, graph, config));
     signals.extend(detect_ticking_bombs(&node_ids, graph, config));
@@ -134,6 +151,11 @@ pub fn detect_signals(graph: &UnifiedGraph, config: &Config) -> Vec<Signal> {
     signals.extend(detect_stale_code(graph));
     signals.extend(detect_intra_file_hotspots(graph));
 
+    // Boundary-aware signals
+    if let Some(bs) = boundaries {
+        signals.extend(detect_boundary_leakage(&co_change_edges, graph, bs));
+    }
+
     signals.sort_by(|a, b| {
         b.severity
             .partial_cmp(&a.severity)
@@ -147,6 +169,7 @@ fn detect_ghost_coupling(
     import_edges: &[(&str, &str, f64)],
     graph: &UnifiedGraph,
     thresholds: &ThresholdConfig,
+    boundaries: Option<&BoundaryStructure>,
 ) -> Vec<Signal> {
     // Build importer index for common-parent suppression.
     let mut importers: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
@@ -170,6 +193,44 @@ fn detect_ghost_coupling(
             continue;
         }
 
+        // Boundary-aware filtering: suppress same-module ghost coupling.
+        // Intra-module co-change without structural edge is almost always
+        // explained by shared parent or sibling relationship.
+        if let Some(bs) = boundaries {
+            let crossing = bs.crossing_type(a, b);
+            let mult = severity_multiplier(&crossing);
+            if mult == 0.0 {
+                continue; // SameModule → suppress
+            }
+
+            let (pkg_a, mod_a) = bs.module_of(a);
+            let (pkg_b, mod_b) = bs.module_of(b);
+
+            let scope_desc = match crossing {
+                CrossingType::CrossPackage => {
+                    format!("Cross-package ({} ↔ {})", pkg_a, pkg_b)
+                }
+                CrossingType::CrossModule => {
+                    format!("Cross-module ({} ↔ {}) in {}", mod_a, mod_b, pkg_a)
+                }
+                CrossingType::SameModule => unreachable!(),
+            };
+
+            signals.push(Signal::new(
+                SignalType::GhostCoupling,
+                a,
+                Some(b),
+                *coupling * mult,
+                format!(
+                    "{}. {:.0}% co-change with no structural dependency.",
+                    scope_desc,
+                    coupling * 100.0
+                ),
+            ));
+            continue;
+        }
+
+        // Legacy path (no boundaries): use common-parent suppression
         let empty = std::collections::HashSet::new();
         let importers_a = importers.get(a).unwrap_or(&empty);
         let importers_b = importers.get(b).unwrap_or(&empty);
@@ -217,6 +278,7 @@ fn detect_fragile_boundaries(
     co_change_edges: &[(&str, &str, f64)],
     graph: &UnifiedGraph,
     thresholds: &ThresholdConfig,
+    boundaries: Option<&BoundaryStructure>,
 ) -> Vec<Signal> {
     let mut signals = Vec::new();
     for (a, b, coupling) in co_change_edges {
@@ -227,11 +289,24 @@ fn detect_fragile_boundaries(
             && *coupling > thresholds.fragile_boundary_coupling
             && fault_prop > thresholds.fragile_boundary_fault_prop
         {
+            // Boundary-aware severity scaling:
+            // Cross-package fragility = 3x, cross-module = 1.5x, same-module = 0.5x
+            let boundary_mult = if let Some(bs) = boundaries {
+                match bs.crossing_type(a, b) {
+                    CrossingType::CrossPackage => 3.0,
+                    CrossingType::CrossModule => 1.5,
+                    CrossingType::SameModule => 0.5,
+                }
+            } else {
+                1.0
+            };
+
+            let base_severity = coupling * fault_prop * 10.0;
             signals.push(Signal::new(
                 SignalType::FragileBoundary,
                 a,
                 Some(b),
-                coupling * fault_prop * 10.0,
+                base_severity * boundary_mult,
                 format!(
                     "Structural dep + {:.0}% co-change + {:.0}% fault propagation. Interface is fragile.",
                     coupling * 100.0,
@@ -247,6 +322,7 @@ fn detect_unnecessary_abstraction(
     import_edges: &[(&str, &str, f64)],
     graph: &UnifiedGraph,
     thresholds: &ThresholdConfig,
+    boundaries: Option<&BoundaryStructure>,
 ) -> Vec<Signal> {
     // Unnecessary Abstraction: detect likely unnecessary abstractions
     //
@@ -289,6 +365,16 @@ fn detect_unnecessary_abstraction(
         // abstraction layers — skip intra-package pairs.
         if is_go_intra_package_pair(a, b) {
             continue;
+        }
+        // Boundary-aware: cross-boundary thin wrappers are intentional adapters
+        if let Some(bs) = boundaries {
+            let crossing = bs.crossing_type(a, b);
+            if matches!(
+                crossing,
+                CrossingType::CrossPackage | CrossingType::CrossModule
+            ) {
+                continue;
+            }
         }
         let pair: (String, String) = if a < b {
             (a.to_string(), b.to_string())
@@ -909,10 +995,71 @@ pub fn summarize_signals(signals: &[Signal]) -> SignalSummary {
             | SignalType::OrphanModule
             | SignalType::DeprecatedUsage
             | SignalType::StaleCode
-            | SignalType::IntraFileHotspot => {}
+            | SignalType::IntraFileHotspot
+            | SignalType::BoundaryLeakage => {}
         }
     }
     summary
+}
+
+/// Detect boundary leakage: modules where >30% of change edges cross into another
+/// module despite low structural coupling. Indicates hidden cross-boundary dependency.
+fn detect_boundary_leakage(
+    co_change_edges: &[(&str, &str, f64)],
+    _graph: &UnifiedGraph,
+    boundaries: &BoundaryStructure,
+) -> Vec<Signal> {
+    use std::collections::HashMap;
+
+    // Count per-module: total change edges and cross-boundary change edges
+    let mut total_edges: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut cross_edges: HashMap<(&str, &str), usize> = HashMap::new();
+
+    for (a, b, _coupling) in co_change_edges {
+        if !is_source_file(a) || !is_source_file(b) {
+            continue;
+        }
+        let (pkg_a, mod_a) = boundaries.module_of(a);
+        let (pkg_b, mod_b) = boundaries.module_of(b);
+
+        *total_edges.entry((pkg_a, mod_a)).or_default() += 1;
+        *total_edges.entry((pkg_b, mod_b)).or_default() += 1;
+
+        if !boundaries.same_module(a, b) {
+            *cross_edges.entry((pkg_a, mod_a)).or_default() += 1;
+            *cross_edges.entry((pkg_b, mod_b)).or_default() += 1;
+        }
+    }
+
+    let mut signals = Vec::new();
+    for (&(pkg, module), &total) in &total_edges {
+        if total < 3 {
+            continue; // Too few edges to be meaningful
+        }
+        let cross = cross_edges.get(&(pkg, module)).copied().unwrap_or(0);
+        let leakage_ratio = cross as f64 / total as f64;
+
+        if leakage_ratio > 0.3 {
+            let module_id = if module == "_root" {
+                pkg.to_string()
+            } else {
+                format!("{}::{}", pkg, module)
+            };
+            signals.push(Signal::new(
+                SignalType::BoundaryLeakage,
+                &module_id,
+                None,
+                leakage_ratio,
+                format!(
+                    "{:.0}% of change edges cross module boundary ({} of {} edges). Potential encapsulation issue.",
+                    leakage_ratio * 100.0,
+                    cross,
+                    total,
+                ),
+            ));
+        }
+    }
+    signals
 }
 
 fn is_reexport_module(path: &str) -> bool {
@@ -1453,7 +1600,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1470,7 +1617,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1488,7 +1635,7 @@ mod tests {
         g.add_edge("a", "b", EdgeType::FaultPropagates, 0.2)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1507,7 +1654,7 @@ mod tests {
         g.add_edge("a", "b", EdgeType::Imports, 1.0).unwrap();
         // No co-change, b has fan-in=1 and low complexity → unnecessary abstraction
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1528,7 +1675,7 @@ mod tests {
         g.add_edge("c", "b", EdgeType::Imports, 1.0).unwrap();
         // b has fan-in=2 — not a single-consumer wrapper
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1552,7 +1699,7 @@ mod tests {
         g.add_edge("a", "c", EdgeType::CoChanges, 0.8).unwrap();
         // No A↔B or B↔C co-change
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1572,7 +1719,7 @@ mod tests {
         g.add_edge("a.py", "c.py", EdgeType::CoChanges, 0.9)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         for w in signals.windows(2) {
             assert!(w[0].severity >= w[1].severity);
         }
@@ -1594,7 +1741,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1617,7 +1764,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.95)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         let ghost = signals
             .iter()
             .find(|s| s.signal_type == SignalType::GhostCoupling);
@@ -1648,7 +1795,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::CoChanges, 0.8)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1681,7 +1828,7 @@ mod tests {
         g.add_edge("src/lib.rs", "src/languages/mod.rs", EdgeType::Imports, 1.0)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1720,7 +1867,7 @@ mod tests {
         )
         .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1743,7 +1890,7 @@ mod tests {
         )
         .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1762,7 +1909,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
         g.add_edge("b.py", "a.py", EdgeType::Imports, 1.0).unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1780,7 +1927,7 @@ mod tests {
         g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
         g.add_edge("b.py", "c.py", EdgeType::Imports, 1.0).unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1799,7 +1946,7 @@ mod tests {
         g.add_edge("b.rs", "c.rs", EdgeType::Imports, 1.0).unwrap();
         g.add_edge("c.rs", "a.rs", EdgeType::Imports, 1.0).unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         let cycle = signals
             .iter()
             .find(|s| s.signal_type == SignalType::DependencyCycle);
@@ -1830,7 +1977,7 @@ mod tests {
                 .unwrap();
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1847,7 +1994,7 @@ mod tests {
         simple.loc = Some(50);
         g.add_node(simple);
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1881,7 +2028,7 @@ mod tests {
         g.add_edge("big.rs", "util.rs", EdgeType::Imports, 1.0)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1907,7 +2054,7 @@ mod tests {
                 .unwrap();
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1930,7 +2077,7 @@ mod tests {
                 .unwrap();
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -1950,7 +2097,7 @@ mod tests {
         g.add_edge("a.py", "c.py", EdgeType::CoChanges, 0.6)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -1987,7 +2134,7 @@ mod tests {
         g.add_edge("stable.py", "unstable.py", EdgeType::Imports, 1.0)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2003,7 +2150,7 @@ mod tests {
         g.add_node(Node::module("b.py", "b.py"));
         g.add_edge("a.py", "b.py", EdgeType::Imports, 1.0).unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2045,7 +2192,7 @@ mod tests {
         .unwrap();
         // No Calls edges pointing to this function
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2065,7 +2212,7 @@ mod tests {
         g.add_edge("app.py::main_fn", "app.py::helper", EdgeType::Calls, 1.0)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals.iter().any(
                 |s| s.signal_type == SignalType::OrphanFunction && s.node_a == "app.py::helper"
@@ -2082,7 +2229,7 @@ mod tests {
         g.add_node(f);
         // No callers, but "main" is an entry point
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2107,7 +2254,7 @@ mod tests {
         );
         // No import edges pointing to this module
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2132,7 +2279,7 @@ mod tests {
             },
         );
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2154,7 +2301,7 @@ mod tests {
             },
         );
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2175,7 +2322,7 @@ mod tests {
         g.add_edge("app.py", "lib.py::old_func", EdgeType::Calls, 1.0)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2194,7 +2341,7 @@ mod tests {
         g.add_edge("app.py", "old_module.py", EdgeType::Imports, 1.0)
             .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2241,7 +2388,7 @@ mod tests {
             },
         );
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2323,7 +2470,7 @@ mod tests {
         g.add_node(f);
         // No callers, but "fmt" is a trait impl
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2340,7 +2487,7 @@ mod tests {
         g.add_node(f);
         // No callers, but it's a struct method likely called via dispatch
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2363,7 +2510,7 @@ mod tests {
             },
         );
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2385,7 +2532,7 @@ mod tests {
             },
         );
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2411,7 +2558,7 @@ mod tests {
                 .unwrap();
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2439,7 +2586,7 @@ mod tests {
         )
         .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2466,7 +2613,7 @@ mod tests {
         )
         .unwrap();
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2488,7 +2635,7 @@ mod tests {
             g.add_node(node);
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             signals
                 .iter()
@@ -2509,7 +2656,7 @@ mod tests {
             g.add_node(node);
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()
@@ -2531,7 +2678,7 @@ mod tests {
             g.add_node(node);
         }
 
-        let signals = detect_signals(&g, &default_config());
+        let signals = detect_signals(&g, &default_config(), None);
         assert!(
             !signals
                 .iter()

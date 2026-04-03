@@ -181,7 +181,7 @@ async fn simulate_handler(
 
     let config = ising_core::config::Config::default();
     let load_case = ising_analysis::stress::single_file_change(&graph, &query.target);
-    let baseline = ising_analysis::stress::compute_risk_field(&graph, &config, None);
+    let baseline = ising_analysis::stress::compute_risk_field(&graph, &config, None, None, None);
     let loaded = ising_analysis::stress::simulate_load_case(&graph, &config, &load_case);
     let delta = ising_analysis::stress::compare_risk_fields(&baseline, &loaded);
 

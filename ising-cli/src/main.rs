@@ -1,9 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
+use ising_analysis::boundary_health::compute_boundary_health;
 use ising_analysis::signals::{detect_signals, summarize_signals};
 use ising_analysis::stress;
+use ising_core::boundary::BoundaryStructure;
 use ising_core::config::Config;
 use ising_core::fea::{LoadCase, RiskTier};
+use ising_core::graph::NodeType;
 use ising_core::metrics::compute_graph_metrics;
 use ising_core::path_utils::is_test_file;
 use ising_db::Database;
@@ -40,6 +43,8 @@ enum Commands {
     Simulate(SimulateArgs),
     /// Start the MCP server for AI agent integration
     Serve(ServeArgs),
+    /// Show detected module boundaries
+    Boundaries(BoundariesArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -182,6 +187,16 @@ struct ServeArgs {
     db: PathBuf,
 }
 
+#[derive(clap::Args, Debug)]
+struct BoundariesArgs {
+    /// Path to the repository root
+    #[arg(long, default_value = ".")]
+    repo_path: PathBuf,
+    /// Output format
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 enum ExportFormat {
     Json,
@@ -223,6 +238,7 @@ fn run(cli: Cli) -> Result<i32> {
         Commands::Health(args) => cmd_health(args),
         Commands::Simulate(args) => cmd_simulate(args),
         Commands::Serve(args) => cmd_serve(args),
+        Commands::Boundaries(args) => cmd_boundaries(args),
     }
 }
 
@@ -239,8 +255,32 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
     // Build the multi-layer graph
     let graph = ising_builders::build_all(&repo_path, &config)?;
 
-    // Detect cross-layer signals
-    let signals = detect_signals(&graph, &config);
+    // Detect module boundaries
+    let module_ids: Vec<String> = graph
+        .node_ids()
+        .filter(|id| {
+            graph
+                .get_node(id)
+                .is_some_and(|n| n.node_type == NodeType::Module)
+        })
+        .map(|s| s.to_string())
+        .collect();
+    let module_id_refs: Vec<&str> = module_ids.iter().map(|s| s.as_str()).collect();
+    let boundaries = BoundaryStructure::detect(&repo_path, &module_id_refs);
+
+    eprintln!(
+        "Boundaries: {} ({:?}, {} modules)",
+        match &boundaries.l1_source {
+            ising_core::boundary::BoundarySource::Manifest { ecosystem } => ecosystem.clone(),
+            ising_core::boundary::BoundarySource::Directory => "directory".to_string(),
+            ising_core::boundary::BoundarySource::SingleRoot => "single-root".to_string(),
+        },
+        boundaries.l1_source,
+        boundaries.module_count(),
+    );
+
+    // Detect cross-layer signals (boundary-aware)
+    let signals = detect_signals(&graph, &config, Some(&boundaries));
 
     // Compute graph metrics
     let metrics = compute_graph_metrics(&graph);
@@ -264,9 +304,22 @@ fn cmd_build(args: BuildArgs) -> Result<i32> {
         )?;
     }
 
-    // Compute and store risk field (with signal summary for health index)
+    // Compute initial risk field for boundary health computation
     let signal_summary = summarize_signals(&signals);
-    let risk_field = stress::compute_risk_field(&graph, &config, Some(&signal_summary));
+    let initial_field =
+        stress::compute_risk_field(&graph, &config, Some(&signal_summary), None, None);
+
+    // Compute boundary health metrics using initial risk field
+    let boundary_report = compute_boundary_health(&graph, &boundaries, &initial_field.nodes);
+
+    // Compute final risk field with boundary-aware propagation and health index
+    let risk_field = stress::compute_risk_field(
+        &graph,
+        &config,
+        Some(&signal_summary),
+        Some(&boundaries),
+        Some(&boundary_report),
+    );
     db.store_risk_field(&risk_field)?;
 
     // Count modules vs functions in risk field
@@ -706,7 +759,7 @@ fn cmd_simulate(args: SimulateArgs) -> Result<i32> {
     };
 
     // Compute baseline and loaded risk fields
-    let baseline = stress::compute_risk_field(&graph, &config, None);
+    let baseline = stress::compute_risk_field(&graph, &config, None, None, None);
     let loaded = stress::simulate_load_case(&graph, &config, &load_case);
     let delta = stress::compare_risk_fields(&baseline, &loaded);
 
@@ -790,6 +843,67 @@ fn cmd_serve(args: ServeArgs) -> Result<i32> {
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     })?;
+
+    Ok(0)
+}
+
+fn cmd_boundaries(args: BoundariesArgs) -> Result<i32> {
+    let repo_path = args.repo_path.canonicalize()?;
+
+    // We need node IDs to detect boundaries — scan source files
+    let ignore = ising_core::ignore::IgnoreRules::load(&repo_path);
+    let graph = ising_builders::structural::build_structural_graph(&repo_path, &ignore)?;
+
+    let module_ids: Vec<String> = graph
+        .node_ids()
+        .filter(|id| {
+            graph
+                .get_node(id)
+                .is_some_and(|n| n.node_type == NodeType::Module)
+        })
+        .map(|s| s.to_string())
+        .collect();
+    let module_id_refs: Vec<&str> = module_ids.iter().map(|s| s.as_str()).collect();
+    let boundaries = BoundaryStructure::detect(&repo_path, &module_id_refs);
+
+    if args.format == OutputFormat::Json {
+        let json = serde_json::to_string_pretty(&boundaries)?;
+        println!("{json}");
+        return Ok(0);
+    }
+
+    let source_desc = match &boundaries.l1_source {
+        ising_core::boundary::BoundarySource::Manifest { ecosystem } => {
+            format!("Manifest ({ecosystem})")
+        }
+        ising_core::boundary::BoundarySource::Directory => "Directory fallback".to_string(),
+        ising_core::boundary::BoundarySource::SingleRoot => "Single root".to_string(),
+    };
+
+    println!("Boundary source: {}", source_desc);
+    println!(
+        "Packages: {}  Modules: {}",
+        boundaries.packages.len(),
+        boundaries.module_count()
+    );
+    println!();
+
+    for pkg in &boundaries.packages {
+        println!("  {}  ({} modules)", pkg.id, pkg.modules.len());
+        for module in &pkg.modules {
+            println!(
+                "    {}  {} files  [{:?}]",
+                module.id,
+                module.members.len(),
+                module.detection,
+            );
+        }
+    }
+
+    if !boundaries.uncategorized.is_empty() {
+        println!();
+        println!("  _uncategorized  {} files", boundaries.uncategorized.len());
+    }
 
     Ok(0)
 }

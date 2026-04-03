@@ -225,10 +225,48 @@ pub struct HealthIndex {
     #[serde(default)]
     pub structural_sub_score: f64,
 
+    // --- Boundary health (spec 046) ---
+    /// Boundary health score: weighted average containment ratio [0, 1].
+    #[serde(default)]
+    pub boundary_health_score: f64,
+
     // --- Transparency ---
     /// Caveats about data quality or potential bias in this analysis.
     #[serde(default)]
     pub caveats: Vec<String>,
+}
+
+/// Per-module boundary health metrics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryHealth {
+    /// Module identifier (package_id::module_id).
+    pub module_id: String,
+    /// Number of files in this module.
+    pub member_count: usize,
+    /// Fraction of this module's change edges that stay within the module [0, 1].
+    /// 1.0 = perfect containment, 0.0 = all changes leak out.
+    pub containment_ratio: f64,
+    /// Cross-boundary structural edges / total structural edges.
+    pub coupling_ratio: f64,
+    /// Fraction of internal nodes in Critical/Danger zone.
+    pub internal_stress: f64,
+    /// How much risk originating inside this module propagates out.
+    pub risk_export: f64,
+    /// How much external risk propagates into this module.
+    pub risk_import: f64,
+}
+
+/// Aggregate boundary health report across all modules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryHealthReport {
+    /// Per-module health metrics.
+    pub modules: Vec<BoundaryHealth>,
+    /// Weighted average containment ratio across all modules.
+    pub avg_containment: f64,
+    /// Weighted average coupling ratio.
+    pub avg_coupling_ratio: f64,
+    /// Number of modules with containment < 0.5 (leaky boundaries).
+    pub leaky_boundary_count: usize,
 }
 
 /// A single load point in a load case.

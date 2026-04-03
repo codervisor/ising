@@ -10,6 +10,7 @@
 //! The key innovation is cross-layer signal detection: anomalies that only
 //! appear when comparing across layers.
 
+pub mod boundary;
 pub mod config;
 pub mod error;
 pub mod fea;
