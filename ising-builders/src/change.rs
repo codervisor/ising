@@ -216,9 +216,6 @@ pub fn build_change_graph(
                 for (f, churn) in &changed_map {
                     *file_changes.entry(f.clone()).or_default() += 1;
                     *file_churn.entry(f.clone()).or_default() += churn;
-                }
-                // Accumulate per-category churn
-                for (f, churn) in &changed_map {
                     match commit_category {
                         CommitCategory::Fix => {
                             *file_defect_churn.entry(f.clone()).or_default() += churn;
@@ -232,9 +229,6 @@ pub fn build_change_graph(
                 for (f, churn) in &changed_map {
                     *file_changes.entry(f.clone()).or_default() += 1;
                     *file_churn.entry(f.clone()).or_default() += churn;
-                }
-                // Accumulate per-category churn
-                for (f, churn) in &changed_map {
                     match commit_category {
                         CommitCategory::Fix => {
                             *file_defect_churn.entry(f.clone()).or_default() += churn;
