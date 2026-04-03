@@ -54,7 +54,12 @@ Propagation normalizes per-node incoming weights to sum <= 0.95, ensuring conver
 
 FEA-aligned scoring using safety factor zone fractions, structural coupling (λ_max), boundary containment, and signal penalty (see `compute_health_index` in `stress.rs`):
 
-**Formula** (spec 047, fully multiplicative): `score = zone_sub_score × coupling_modifier × containment_modifier × signal_factor`
+**Formula** (spec 047, fully multiplicative + tail risk cap):
+
+```
+base = zone_sub_score × coupling_modifier × containment_modifier × signal_factor
+score = min(base, tail_risk_cap)
+```
 
 | Component | Formula | Range |
 |-----------|---------|-------|
@@ -62,6 +67,7 @@ FEA-aligned scoring using safety factor zone fractions, structural coupling (λ_
 | Coupling modifier | Uses normalized λ (λ/√N). norm<1: `1.0 + (1−norm)×0.05`, norm>1: `1.0 − log₂(norm)×0.05` (clamped [0.85, 1.05]) | [0.85, 1.05] |
 | Containment modifier | `0.70 + 0.35 × avg_containment` (clamped [0.70, 1.05]). Only applied when boundary health is computed. | [0.70, 1.05] |
 | Signal factor | `1.0 − signal_penalty`. Penalty uses adaptive piecewise curve: x≤5: `0.25×x/(x+3)`, x>5: `0.156 + 0.094×log₂(x/5)` (cap 0.30) | [0.70, 1.0] |
+| Tail risk cap | Basel II / Moody's "minimum function": if any non-test node's Expected Loss (`direct_score × (1 + fan_in/max_fan_in)`) > 5.0, score capped at 0.84 (B ceiling). Computed on full risk field including function-level nodes. | floor at 0.84 |
 
 **λ_max** (spectral radius of structural Import graph, unit weights):
 - Raw λ_max is always >>1 for real codebases (hub modules with many imports)
