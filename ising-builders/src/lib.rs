@@ -161,6 +161,8 @@ fn attribute_changes_to_functions(graph: &mut UnifiedGraph) {
                     hotspot_score: metrics.hotspot_score * proportion,
                     sum_coupling: 0.0,
                     last_changed: metrics.last_changed.clone(),
+                    defect_churn: (metrics.defect_churn as f64 * proportion).round() as u32,
+                    feature_churn: (metrics.feature_churn as f64 * proportion).round() as u32,
                 },
             ));
         }

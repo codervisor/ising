@@ -163,6 +163,12 @@ pub struct ChangeMetrics {
     pub hotspot_score: f64,
     pub sum_coupling: f64,
     pub last_changed: Option<String>,
+    /// Lines churned from bug-fix commits (fix, bug, patch, revert, hotfix, CVE, security).
+    #[serde(default)]
+    pub defect_churn: u32,
+    /// Lines churned from feature/non-fix commits.
+    #[serde(default)]
+    pub feature_churn: u32,
 }
 
 /// Defect metrics for a node (Layer 3).

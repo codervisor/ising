@@ -59,7 +59,15 @@ fn collect_maxes_for_type(graph: &UnifiedGraph, node_type: NodeType) -> GraphMax
         max_coupling = max_coupling.max((metrics.fan_in + metrics.fan_out) as f64);
 
         if let Some(cm) = graph.change_metrics.get(node_id) {
-            max_change_pressure = max_change_pressure.max(cm.change_freq as f64 * cm.churn_rate);
+            let pressure = if cm.defect_churn > 0 || cm.feature_churn > 0 {
+                let defect_pressure = cm.defect_churn as f64 * 3.0;
+                let feature_pressure = cm.feature_churn as f64;
+                (cm.change_freq as f64 / cm.churn_lines.max(1) as f64)
+                    * (defect_pressure + feature_pressure)
+            } else {
+                cm.change_freq as f64 * cm.churn_rate
+            };
+            max_change_pressure = max_change_pressure.max(pressure);
         }
     }
 
@@ -83,7 +91,16 @@ fn compute_change_load(
         Some(cm) => cm,
         None => return 0.0,
     };
-    let raw = cm.change_freq as f64 * cm.churn_rate;
+    // Weight defect churn 3x higher than feature churn.
+    // If no churn classification data, fall back to total churn.
+    let raw = if cm.defect_churn > 0 || cm.feature_churn > 0 {
+        let defect_pressure = cm.defect_churn as f64 * 3.0;
+        let feature_pressure = cm.feature_churn as f64;
+        (cm.change_freq as f64 / cm.churn_lines.max(1) as f64)
+            * (defect_pressure + feature_pressure)
+    } else {
+        cm.change_freq as f64 * cm.churn_rate
+    };
     normalize(raw, maxes.change_pressure) * pressure_multiplier
 }
 
@@ -670,25 +687,20 @@ fn assign_risk_tiers(nodes: &mut [NodeRisk]) {
 
 /// Compute aggregate health index for the repository.
 ///
-/// Combines three independent sub-scores to avoid bias from any single metric:
+/// Spec 047 formula (fully multiplicative):
+///   score = zone_sub_score × coupling_modifier × containment_modifier × signal_factor
 ///
-/// 1. **Risk sub-score** (weight 0.40): median direct_score + concentration.
-///    Uses median (not mean) to resist outlier domination in small repos.
-///    Amplified by 5x to spread the distribution.
+/// Components:
+/// - **zone_sub_score** [0.15, 1.0]: weighted average of safety zone fractions (primary driver)
+/// - **coupling_modifier** [0.85, 1.05]: f(λ_max/√N), penalties/bonuses from structural coupling
+/// - **containment_modifier** [0.70, 1.05]: boundary health bonus/penalty
+/// - **signal_factor** [0.70, 1.0]: 1.0 - signal_penalty, architectural signal discount
 ///
-/// 2. **Signal sub-score** (weight 0.35): weighted architectural signals
-///    normalized by sqrt(total_modules). sqrt normalization prevents large
-///    repos from hiding behind their denominator (same principle as TF-IDF).
-///    SystemicComplexity uses a flat 2.5x weight (not sqrt-normalized).
+/// Signal penalty uses an adaptive piecewise curve:
+///   x ≤ 5: 0.25 × x/(x+3)  (gentle sigmoid)
+///   x > 5: 0.156 + 0.094 × log₂(x/5)  (log growth, cap 0.30)
 ///
-/// 3. **Structural sub-score** (weight 0.25): cycle + unstable dependency
-///    entanglement, also sqrt-normalized.
-///
-/// Bias prevention:
-/// - Median instead of mean → resistant to outlier domination
-/// - sqrt(N) normalization instead of count/N → sub-linear, scale-fair
-/// - Sub-score decomposition → transparent what drives the grade
-/// - Caveats emitted when data is insufficient → honest about limitations
+/// Legacy sub-scores (risk, signal, structural) still computed for backward compatibility.
 fn compute_health_index(
     nodes: &[NodeRisk],
     signals: &SignalSummary,
@@ -814,20 +826,20 @@ fn compute_health_index(
     } else {
         0.0
     };
+    // Phase 2 (spec 047): Widened range [0.85, 1.05] gives coupling a 20% total swing,
+    // enough to shift a grade. Bonus/penalty coefficients scaled up accordingly.
     let coupling_bonus = if normalized_lambda < 1.0 {
-        (1.0 - normalized_lambda) * 0.03
+        (1.0 - normalized_lambda) * 0.05
     } else {
         0.0
     };
     let coupling_penalty = if normalized_lambda > 1.0 {
-        // Very gentle log penalty: log2(norm_λ) * 0.02, capped at 5%
-        // The coupling modifier should nudge, not dominate — zone fractions
-        // are the primary signal. λ/√N=10 → penalty = 0.066, clamped to 0.05.
-        (normalized_lambda.log2() * 0.02).min(0.05)
+        // Log penalty: log2(norm_λ) * 0.05, capped at 15%.
+        (normalized_lambda.log2() * 0.05).min(0.15)
     } else {
         0.0
     };
-    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.95, 1.03);
+    let coupling_modifier = (1.0 + coupling_bonus - coupling_penalty).clamp(0.85, 1.05);
 
     // === Signal penalty ===
     // Signals are architectural problems detected across layers. Instead of a separate
@@ -844,10 +856,16 @@ fn compute_health_index(
         + (signals.unstable_dep_count as f64 / sqrt_n) * 2.0
         + (signals.ghost_coupling_count as f64 / sqrt_n) * 1.0
         + (signals.systemic_complexity_count as f64) * 2.5;
-    // Convert to a penalty [0, 0.25]. Sigmoid-like curve: penalty saturates at 0.25.
-    // weighted_signal_score=1 → penalty ≈ 0.06, =3 → 0.13, =10 → 0.21
-    let signal_penalty =
-        (0.25 * weighted_signal_score / (weighted_signal_score + 3.0)).clamp(0.0, 0.25);
+    // Phase 5 (spec 047): Adaptive piecewise penalty curve.
+    // Below x=5: gentle sigmoid (same as before). Above x=5: log growth for better
+    // discrimination between signal-heavy repos (e.g., kubernetes vs prometheus).
+    // Cap raised from 0.25 to 0.30.
+    let signal_penalty = if weighted_signal_score <= 5.0 {
+        (0.25 * weighted_signal_score / (weighted_signal_score + 3.0)).clamp(0.0, 0.25)
+    } else {
+        // 0.156 is the sigmoid value at x=5: 0.25 * 5/(5+3)
+        (0.15625 + 0.094 * (weighted_signal_score / 5.0).log2()).clamp(0.0, 0.30)
+    };
 
     // === Boundary health score ===
     // When boundary health is available, incorporate containment into scoring.
@@ -856,18 +874,21 @@ fn compute_health_index(
     let boundary_health_score = boundary_health.map(|bh| bh.avg_containment).unwrap_or(1.0);
 
     // === Final score ===
-    // When boundary health is available:
-    //   containment_modifier = 0.85 + 0.15 × avg_containment  (range [0.85, 1.0])
-    //   score = zone_sub_score × coupling_modifier × containment_modifier − signal_penalty
-    // Otherwise (legacy):
-    //   score = zone_sub_score × coupling_modifier − signal_penalty
+    // Phase 1 (spec 047): Fully multiplicative formula. Signal penalty is applied as a
+    // discount factor (1 - penalty) instead of being subtracted. This makes the penalty
+    // proportional: a 15% penalty reduces any pre-penalty score by 15%, regardless of
+    // the base value. Eliminates asymmetric penalty behavior.
+    //
+    // Phase 2 (spec 047): Containment modifier widened to [0.70, 1.05]. Well-contained
+    // repos get a small bonus; leaky repos get a meaningful penalty.
+    let signal_factor = 1.0 - signal_penalty;
     let score = if let Some(bh) = boundary_health {
-        // Containment modifier: maps avg_containment [0, 1] to [0.85, 1.0].
-        // High containment (>0.8) is nearly neutral; low containment (<0.5) penalizes up to 15%.
-        let containment_modifier = 0.85 + 0.15 * bh.avg_containment;
-        (zone_sub_score * coupling_modifier * containment_modifier - signal_penalty).clamp(0.0, 1.0)
+        // Containment modifier: maps avg_containment [0, 1] to [0.70, 1.05].
+        // High containment (>0.9) gets a bonus; low containment (<0.5) penalizes up to 30%.
+        let containment_modifier = (0.70 + 0.35 * bh.avg_containment).clamp(0.70, 1.05);
+        (zone_sub_score * coupling_modifier * containment_modifier * signal_factor).clamp(0.0, 1.0)
     } else {
-        (zone_sub_score * coupling_modifier - signal_penalty).clamp(0.0, 1.0)
+        (zone_sub_score * coupling_modifier * signal_factor).clamp(0.0, 1.0)
     };
 
     let grade = if score >= 0.85 {

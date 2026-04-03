@@ -39,6 +39,8 @@ impl Database {
                 hotspot_score REAL,
                 sum_coupling REAL,
                 last_changed TEXT,
+                defect_churn INTEGER DEFAULT 0,
+                feature_churn INTEGER DEFAULT 0,
                 FOREIGN KEY (node_id) REFERENCES nodes(id)
             );
 
@@ -107,6 +109,7 @@ impl Database {
                 risk_sub_score REAL DEFAULT 0.0,
                 signal_sub_score REAL DEFAULT 0.0,
                 structural_sub_score REAL DEFAULT 0.0,
+                boundary_health_score REAL DEFAULT 0.0,
                 caveats TEXT DEFAULT '[]'
             );
 
@@ -126,6 +129,13 @@ impl Database {
 
         // Migration: add deprecated column to existing nodes tables
         self.migrate_add_column("nodes", "deprecated", "BOOLEAN DEFAULT 0")?;
+
+        // Migration: add boundary_health_score to health_index
+        self.migrate_add_column("health_index", "boundary_health_score", "REAL DEFAULT 0.0")?;
+
+        // Migration: add defect/feature churn columns to change_metrics
+        self.migrate_add_column("change_metrics", "defect_churn", "INTEGER DEFAULT 0")?;
+        self.migrate_add_column("change_metrics", "feature_churn", "INTEGER DEFAULT 0")?;
 
         Ok(())
     }

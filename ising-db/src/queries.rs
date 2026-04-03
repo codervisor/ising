@@ -39,6 +39,29 @@ impl Database {
             }
         }
 
+        // Ensure all change_metrics and defect_metrics node_ids exist as nodes
+        // (change graph may reference files not in the structural graph)
+        {
+            let existing_nodes: std::collections::HashSet<String> = graph
+                .graph
+                .node_indices()
+                .map(|idx| graph.graph[idx].id.clone())
+                .collect();
+            let mut missing_stmt = tx.prepare(
+                "INSERT OR IGNORE INTO nodes (id, type, file_path) VALUES (?1, 'module', ?2)",
+            )?;
+            for node_id in graph.change_metrics.keys() {
+                if !existing_nodes.contains(node_id) {
+                    missing_stmt.execute(params![node_id, node_id])?;
+                }
+            }
+            for node_id in graph.defect_metrics.keys() {
+                if !existing_nodes.contains(node_id) {
+                    missing_stmt.execute(params![node_id, node_id])?;
+                }
+            }
+        }
+
         // Insert edges
         {
             let mut stmt = tx.prepare(
@@ -72,8 +95,8 @@ impl Database {
         // Insert change metrics
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO change_metrics (node_id, change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR REPLACE INTO change_metrics (node_id, change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed, defect_churn, feature_churn)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for (node_id, cm) in &graph.change_metrics {
                 stmt.execute(params![
@@ -84,6 +107,8 @@ impl Database {
                     cm.hotspot_score,
                     cm.sum_coupling,
                     cm.last_changed,
+                    cm.defect_churn,
+                    cm.feature_churn,
                 ])?;
             }
         }
@@ -119,12 +144,20 @@ impl Database {
     ) -> Result<(), DbError> {
         let now = chrono::Utc::now().to_rfc3339();
         let details_str = details.map(serde_json::to_string).transpose()?;
-        self.conn.execute(
+        match self.conn.execute(
             "INSERT INTO signals (signal_type, node_a, node_b, severity, details, detected_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![signal_type, node_a, node_b, severity, details_str, now],
-        )?;
-        Ok(())
+        ) {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                // Skip signals referencing non-existent nodes (FK violation)
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Store build metadata.
@@ -318,7 +351,7 @@ impl Database {
         let change_metrics = self
             .conn
             .query_row(
-                "SELECT change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed
+                "SELECT change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed, defect_churn, feature_churn
                  FROM change_metrics WHERE node_id = ?1",
                 params![node_id],
                 |row| {
@@ -329,6 +362,8 @@ impl Database {
                         hotspot_score: row.get(3)?,
                         sum_coupling: row.get(4)?,
                         last_changed: row.get(5)?,
+                        defect_churn: row.get::<_, Option<u32>>(6)?.unwrap_or(0),
+                        feature_churn: row.get::<_, Option<u32>>(7)?.unwrap_or(0),
                     })
                 },
             )
@@ -345,6 +380,22 @@ impl Database {
     /// Store a risk field to the database.
     pub fn store_risk_field(&self, field: &RiskField) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction()?;
+
+        // Ensure all risk field node_ids exist in the nodes table
+        // (function-level nodes may need to be added)
+        {
+            let mut ensure_stmt = tx
+                .prepare("INSERT OR IGNORE INTO nodes (id, type, file_path) VALUES (?1, ?2, ?3)")?;
+            for nr in &field.nodes {
+                let node_type = if nr.node_id.contains("::") {
+                    "function"
+                } else {
+                    "module"
+                };
+                ensure_stmt.execute(params![nr.node_id, node_type, nr.file_path])?;
+            }
+        }
+
         {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO risk_data
@@ -389,8 +440,9 @@ impl Database {
                   lambda_max,
                   signal_density, god_module_density, cycle_density, unstable_dep_density,
                   zone_sub_score, coupling_modifier, signal_penalty,
-                  risk_sub_score, signal_sub_score, structural_sub_score, caveats)
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                  risk_sub_score, signal_sub_score, structural_sub_score,
+                  boundary_health_score, caveats)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     health.score,
                     health.grade,
@@ -416,6 +468,7 @@ impl Database {
                     health.risk_sub_score,
                     health.signal_sub_score,
                     health.structural_sub_score,
+                    health.boundary_health_score,
                     caveats_json,
                 ],
             )?;
@@ -482,11 +535,12 @@ impl Database {
                     lambda_max,
                     signal_density, god_module_density, cycle_density, unstable_dep_density,
                     zone_sub_score, coupling_modifier, signal_penalty,
-                    risk_sub_score, signal_sub_score, structural_sub_score, caveats
+                    risk_sub_score, signal_sub_score, structural_sub_score,
+                    boundary_health_score, caveats
              FROM health_index WHERE id = 1",
         )?;
         let mut rows = stmt.query_map([], |row| {
-            let caveats_str: String = row.get::<_, String>(24).unwrap_or_default();
+            let caveats_str: String = row.get::<_, String>(25).unwrap_or_default();
             let caveats: Vec<String> = serde_json::from_str(&caveats_str).unwrap_or_default();
             Ok(crate::StoredHealth {
                 score: row.get(0)?,
@@ -513,6 +567,7 @@ impl Database {
                 risk_sub_score: row.get(21)?,
                 signal_sub_score: row.get(22)?,
                 structural_sub_score: row.get(23)?,
+                boundary_health_score: row.get(24)?,
                 caveats,
             })
         })?;
@@ -594,7 +649,7 @@ impl Database {
         // Load change metrics
         {
             let mut stmt = self.conn.prepare(
-                "SELECT node_id, change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed
+                "SELECT node_id, change_freq, churn_lines, churn_rate, hotspot_score, sum_coupling, last_changed, defect_churn, feature_churn
                  FROM change_metrics",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -608,6 +663,8 @@ impl Database {
                         hotspot_score: row.get(4)?,
                         sum_coupling: row.get(5)?,
                         last_changed: row.get(6)?,
+                        defect_churn: row.get::<_, Option<u32>>(7)?.unwrap_or(0),
+                        feature_churn: row.get::<_, Option<u32>>(8)?.unwrap_or(0),
                     },
                 ))
             })?;

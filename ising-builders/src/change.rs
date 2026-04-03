@@ -36,6 +36,69 @@ fn parse_time_window(window: &str) -> Option<i64> {
     Some(now - seconds)
 }
 
+/// Classify a commit message into a category for churn separation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitCategory {
+    Fix,
+    Feature,
+    Refactor,
+    Maintenance,
+    Unknown,
+}
+
+fn classify_commit(message: &str) -> CommitCategory {
+    let lower = message.to_lowercase();
+    // Check fix patterns first (highest priority)
+    if lower.starts_with("fix")
+        || lower.starts_with("revert")
+        || lower.starts_with("hotfix")
+        || lower.contains("bug fix")
+        || lower.contains("bugfix")
+        || lower.contains("patch:")
+        || lower.contains("cve-")
+        || lower.contains("security fix")
+        || lower.contains("issue #")
+        || lower.starts_with("fix(")
+        || lower.starts_with("fix:")
+    {
+        return CommitCategory::Fix;
+    }
+    // Refactor patterns
+    if lower.starts_with("refactor")
+        || lower.contains("cleanup")
+        || lower.contains("clean up")
+        || lower.starts_with("rename")
+        || lower.contains("reorganize")
+        || lower.contains("simplify")
+        || lower.contains("extract ")
+    {
+        return CommitCategory::Refactor;
+    }
+    // Maintenance patterns
+    if lower.starts_with("chore")
+        || lower.starts_with("bump")
+        || lower.starts_with("update dep")
+        || lower.starts_with("upgrade")
+        || lower.contains("dependency")
+        || lower.starts_with("ci:")
+        || lower.starts_with("docs:")
+        || lower.starts_with("build:")
+    {
+        return CommitCategory::Maintenance;
+    }
+    // Feature patterns
+    if lower.starts_with("feat")
+        || lower.starts_with("add ")
+        || lower.starts_with("implement")
+        || lower.starts_with("new ")
+        || lower.contains("support ")
+        || lower.starts_with("enable")
+    {
+        return CommitCategory::Feature;
+    }
+    CommitCategory::Unknown
+}
+
 /// Build the change graph from git history.
 pub fn build_change_graph(
     repo_path: &Path,
@@ -61,6 +124,8 @@ pub fn build_change_graph(
     // Collect changed files per commit by walking the commit graph
     let mut file_changes: HashMap<String, u32> = HashMap::new();
     let mut file_churn: HashMap<String, u32> = HashMap::new();
+    let mut file_defect_churn: HashMap<String, u32> = HashMap::new();
+    let mut file_feature_churn: HashMap<String, u32> = HashMap::new();
     let mut co_changes: HashMap<(String, String), u32> = HashMap::new();
     let mut file_last_changed: HashMap<String, i64> = HashMap::new(); // file -> most recent commit timestamp
     let mut total_commits: u32 = 0;
@@ -116,6 +181,12 @@ pub fn build_change_graph(
 
         // Get changed files with per-file churn lines by diffing against parent.
         let changed_files_raw = get_changed_files_with_hunks(&repo, &commit)?;
+        let commit_msg = commit
+            .message_raw()
+            .ok()
+            .and_then(|m| m.to_str().ok().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let commit_category = classify_commit(&commit_msg);
         let changed_map: HashMap<String, u32> = changed_files_raw
             .iter()
             .filter(|(f, _, _)| Language::is_supported_file(f) && !ignore.is_ignored(f))
@@ -146,10 +217,32 @@ pub fn build_change_graph(
                     *file_changes.entry(f.clone()).or_default() += 1;
                     *file_churn.entry(f.clone()).or_default() += churn;
                 }
+                // Accumulate per-category churn
+                for (f, churn) in &changed_map {
+                    match commit_category {
+                        CommitCategory::Fix => {
+                            *file_defect_churn.entry(f.clone()).or_default() += churn;
+                        }
+                        _ => {
+                            *file_feature_churn.entry(f.clone()).or_default() += churn;
+                        }
+                    }
+                }
             } else {
                 for (f, churn) in &changed_map {
                     *file_changes.entry(f.clone()).or_default() += 1;
                     *file_churn.entry(f.clone()).or_default() += churn;
+                }
+                // Accumulate per-category churn
+                for (f, churn) in &changed_map {
+                    match commit_category {
+                        CommitCategory::Fix => {
+                            *file_defect_churn.entry(f.clone()).or_default() += churn;
+                        }
+                        _ => {
+                            *file_feature_churn.entry(f.clone()).or_default() += churn;
+                        }
+                    }
                 }
 
                 // All unique pairs (only for reasonably-sized commits)
@@ -271,6 +364,8 @@ pub fn build_change_graph(
                 hotspot_score: hotspot,
                 sum_coupling,
                 last_changed,
+                defect_churn: file_defect_churn.get(file).copied().unwrap_or(0),
+                feature_churn: file_feature_churn.get(file).copied().unwrap_or(0),
             },
         );
     }
