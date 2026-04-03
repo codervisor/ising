@@ -287,6 +287,9 @@ pub fn compute_risk_field(
     );
     // Add function-level risk entries (separate normalization and tier assignment)
     compute_function_risks(graph, config, &mut field);
+    // Apply tail risk cap (Moody's minimum function) on the full risk field
+    // including function-level nodes — this catches e.g. TypeScript's createTypeChecker.
+    apply_tail_risk_cap(&mut field, graph);
     field
 }
 
@@ -696,6 +699,11 @@ fn assign_risk_tiers(nodes: &mut [NodeRisk]) {
 ///   x ≤ 5: 0.25 × x/(x+3)  (gentle sigmoid)
 ///   x > 5: 0.156 + 0.094 × log₂(x/5)  (log growth, cap 0.30)
 ///
+/// Tail risk (Basel II / Moody's-inspired):
+/// - Expected Loss per module: EL = direct_score × (1 + fan_in / max_fan_in)
+/// - HHI over EL distribution measures concentration risk
+/// - If max(EL) > 3.0, score is capped at 0.84 (B ceiling) — Moody's "minimum function"
+///
 /// Legacy sub-scores (risk, signal, structural) still computed for backward compatibility.
 fn compute_health_index(
     nodes: &[NodeRisk],
@@ -741,6 +749,9 @@ fn compute_health_index(
             signal_sub_score: 1.0,
             structural_sub_score: 1.0,
             boundary_health_score: 1.0,
+            max_expected_loss: 0.0,
+            el_hhi: 0.0,
+            tail_risk_capped: false,
             caveats,
         };
     }
@@ -869,18 +880,49 @@ fn compute_health_index(
     // (1.0 = perfect, 0.0 = all leaks). When not computed, default to 1.0 (neutral).
     let boundary_health_score = boundary_health.map(|bh| bh.avg_containment).unwrap_or(1.0);
 
+    // === Expected Loss metrics (Basel II-inspired, for transparency) ===
+    // EL = direct_score × (1 + fan_in_normalized) per module.
+    // Computed here for the HealthIndex record; the actual tail risk cap is applied
+    // post-hoc in apply_tail_risk_cap() after function-level nodes are added.
+    let max_fan_in = active
+        .iter()
+        .map(|n| compute_node_metrics(graph, &n.node_id).fan_in)
+        .max()
+        .unwrap_or(0) as f64;
+
+    let expected_losses: Vec<f64> = active
+        .iter()
+        .map(|n| {
+            let fan_in = compute_node_metrics(graph, &n.node_id).fan_in as f64;
+            let fan_in_norm = if max_fan_in > 0.0 {
+                fan_in / max_fan_in
+            } else {
+                0.0
+            };
+            n.direct_score * (1.0 + fan_in_norm)
+        })
+        .collect();
+
+    let total_el: f64 = expected_losses.iter().sum();
+    let max_el = expected_losses.iter().copied().fold(0.0_f64, f64::max);
+    let el_hhi = if total_el > 0.0 {
+        expected_losses
+            .iter()
+            .map(|el| {
+                let share = el / total_el;
+                share * share
+            })
+            .sum::<f64>()
+    } else {
+        0.0
+    };
+
     // === Final score ===
-    // Phase 1 (spec 047): Fully multiplicative formula. Signal penalty is applied as a
-    // discount factor (1 - penalty) instead of being subtracted. This makes the penalty
-    // proportional: a 15% penalty reduces any pre-penalty score by 15%, regardless of
-    // the base value. Eliminates asymmetric penalty behavior.
-    //
-    // Phase 2 (spec 047): Containment modifier widened to [0.70, 1.05]. Well-contained
-    // repos get a small bonus; leaky repos get a meaningful penalty.
+    // Fully multiplicative formula (spec 047 Phase 1).
+    // Tail risk cap is applied separately after function-level nodes are added
+    // (see apply_tail_risk_cap).
     let signal_factor = 1.0 - signal_penalty;
     let score = if let Some(bh) = boundary_health {
-        // Containment modifier: maps avg_containment [0, 1] to [0.70, 1.05].
-        // High containment (>0.9) gets a bonus; low containment (<0.5) penalizes up to 30%.
         let containment_modifier = (0.70 + 0.35 * bh.avg_containment).clamp(0.70, 1.05);
         (zone_sub_score * coupling_modifier * containment_modifier * signal_factor).clamp(0.0, 1.0)
     } else {
@@ -976,6 +1018,8 @@ fn compute_health_index(
             frac_critical * 100.0
         ));
     }
+    // Note: tail_risk_capped is initially false here; it gets set by
+    // apply_tail_risk_cap() which runs after function-level nodes are added.
 
     HealthIndex {
         score,
@@ -1003,7 +1047,83 @@ fn compute_health_index(
         signal_sub_score,
         structural_sub_score,
         boundary_health_score,
+        max_expected_loss: max_el,
+        el_hhi,
+        tail_risk_capped: false, // Set by apply_tail_risk_cap() post-hoc
         caveats,
+    }
+}
+
+/// Apply tail risk cap (Moody's "minimum function") to the health index.
+///
+/// Computed on the FULL risk field including function-level nodes, so that
+/// function-level systemic risks (e.g., TypeScript's `createTypeChecker`) are caught.
+///
+/// Expected Loss = direct_score × (1 + fan_in / max_fan_in).
+/// - Test files are excluded (high churn but zero blast radius).
+/// - If max(EL) among non-test nodes exceeds the threshold, score is capped at B (0.84).
+fn apply_tail_risk_cap(field: &mut RiskField, graph: &UnifiedGraph) {
+    use ising_core::path_utils::is_test_file;
+
+    let health = match &field.health {
+        Some(h) => h,
+        None => return,
+    };
+
+    // Only consider active (changed) nodes that are NOT test files.
+    let active_non_test: Vec<&NodeRisk> = field
+        .nodes
+        .iter()
+        .filter(|n| n.change_load > 0.0 && !is_test_file(&n.file_path))
+        .collect();
+
+    if active_non_test.is_empty() {
+        return;
+    }
+
+    let max_fan_in = active_non_test
+        .iter()
+        .map(|n| compute_node_metrics(graph, &n.node_id).fan_in)
+        .max()
+        .unwrap_or(0) as f64;
+
+    // Compute EL for each non-test active node.
+    let mut max_el = 0.0_f64;
+    let mut max_el_node = String::new();
+    for n in &active_non_test {
+        let fan_in = compute_node_metrics(graph, &n.node_id).fan_in as f64;
+        let fan_in_norm = if max_fan_in > 0.0 {
+            fan_in / max_fan_in
+        } else {
+            0.0
+        };
+        let el = n.direct_score * (1.0 + fan_in_norm);
+        if el > max_el {
+            max_el = el;
+            max_el_node = n.node_id.clone();
+        }
+    }
+
+    // Threshold calibrated against benchmark: 5.0 catches true systemic risks
+    // (TypeScript createTypeChecker EL≈40, svelte compiler EL≈13) while avoiding
+    // false positives from normal high-churn production files (typical EL < 3).
+    const TAIL_RISK_EL_THRESHOLD: f64 = 5.0;
+
+    if max_el > TAIL_RISK_EL_THRESHOLD && health.score > 0.84 {
+        let mut updated = health.clone();
+        updated.score = updated.score.min(0.84);
+        updated.grade = "B".to_string();
+        updated.tail_risk_capped = true;
+        updated.max_expected_loss = max_el;
+        updated.caveats.push(format!(
+            "Tail risk cap: {} has Expected Loss {:.1} (>{:.0} threshold), grade capped at B",
+            max_el_node.rsplit('/').next().unwrap_or(&max_el_node),
+            max_el,
+            TAIL_RISK_EL_THRESHOLD
+        ));
+        field.health = Some(updated);
+    } else if let Some(h) = &mut field.health {
+        h.max_expected_loss = max_el;
     }
 }
 

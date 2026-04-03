@@ -230,6 +230,19 @@ pub struct HealthIndex {
     #[serde(default)]
     pub boundary_health_score: f64,
 
+    // --- Expected Loss concentration risk (spec 047, Basel II-inspired) ---
+    /// Maximum per-module Expected Loss (direct_score × fan_in_normalized).
+    /// Identifies the single highest systemic-risk module.
+    #[serde(default)]
+    pub max_expected_loss: f64,
+    /// Herfindahl-Hirschman Index over Expected Loss distribution [0, 1].
+    /// High HHI = risk concentrated in few modules; low = well-diversified.
+    #[serde(default)]
+    pub el_hhi: f64,
+    /// Whether the tail risk cap was triggered (max EL exceeded threshold).
+    #[serde(default)]
+    pub tail_risk_capped: bool,
+
     // --- Transparency ---
     /// Caveats about data quality or potential bias in this analysis.
     #[serde(default)]
