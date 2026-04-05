@@ -134,11 +134,11 @@ Clamped to [0, 1]. Grade thresholds: A >= 0.85, B >= 0.70, C >= 0.55, D >= 0.40,
 | **Coupling modifier** | Spectral radius of the import graph normalized by sqrt(N). Loosely coupled (<1.0 normalized) gets a slight bonus; tightly coupled (>1.0) gets a gentle penalty. | [0.85, 1.05] |
 | **Signal factor** | Penalty from detected signals using an adaptive piecewise curve. Weighted signal score accounts for signal severity (cycles=4x, god modules=3x, etc.) normalized by sqrt(N). | [0.70, 1.0] |
 | **Containment modifier** | Boundary health: `0.70 + 0.35 * avg_containment`. Only applied when boundaries are detected. | [0.70, 1.05] |
-| **Tail risk cap** | If any non-test module's expected loss exceeds 5.0, score is capped at 0.84 (B ceiling). Prevents a single extreme outlier from hiding behind a good average. | floor at 0.84 |
+| **Tail risk cap** | If any non-test module's expected loss exceeds 5.0, score is capped at 0.84 (B ceiling). Prevents a single extreme outlier from hiding behind a good average. | ceiling at 0.84 |
 
 ## Cross-Layer Signals
 
-Ising detects 16 signal types across three priority levels:
+Ising detects 16 signal types across four priority levels:
 
 ### Critical
 
@@ -161,11 +161,16 @@ Ising detects 16 signal types across three priority levels:
 | **BoundaryLeakage** | Module has >30% of change edges crossing a boundary despite low structural coupling. |
 | **DeprecatedUsage** | A deprecated symbol is still being called or imported. |
 
+### Guard
+
+| Signal | What It Means |
+|--------|--------------|
+| **StableCore** | A heavily-depended-upon module that rarely changes. Not a failure condition -- a guard signal to preserve architectural integrity around critical shared code. |
+
 ### Informational
 
 | Signal | What It Means |
 |--------|--------------|
-| **StableCore** | A heavily-depended-upon module that rarely changes. Protect it. |
 | **UnnecessaryAbstraction** | A structural dependency exists but the files never co-change. May be dead indirection. |
 | **OrphanFunction** | A function with zero callers (excluding entry points like main, test, init). |
 | **OrphanModule** | A module with zero importers (excluding entry points and generated code). |
@@ -184,7 +189,7 @@ Ising detects 16 signal types across three priority levels:
 | `ising hotspots` | Top hotspots ranked by change frequency * complexity |
 | `ising stats` | Global graph statistics |
 | `ising boundaries` | Detected module boundaries (packages + modules) |
-| `ising export` | Graph export (JSON, Dot, Mermaid, VizJson) |
+| `ising export --format <json\|dot\|mermaid\|viz-json>` | Graph export in the selected format |
 | `ising serve` | Start MCP server (default port 3000) |
 
 Most commands support `--format json` for machine-readable output.
@@ -219,7 +224,7 @@ Exposes tools for AI coding agents:
 | `GET /simulate?target=path/to/file.py` | Blast radius simulation |
 | `GET /impact?target=path/to/file.py` | Impact analysis for a file |
 | `GET /signals` | Active cross-layer signals |
-| `GET /signals?type=GhostCoupling&min_severity=0.5` | Filtered signals |
+| `GET /signals?type=ghost_coupling&min_severity=0.5` | Filtered signals |
 | `GET /health` | Repository health index |
 
 ## Configuration
@@ -232,11 +237,9 @@ time_window = "6 months ago"   # Git history window
 max_commits = 5000             # Max commits to analyze
 max_files_per_commit = 50      # Skip large commits (refactors, renames)
 
-[change]
-min_co_changes = 3             # Minimum co-change count for coupling edges
-min_coupling = 0.15            # Minimum coupling score for edges
-
 [thresholds]
+min_co_changes = 3                 # Minimum co-change count for coupling edges
+min_coupling = 0.15                # Minimum coupling score for edges
 ghost_coupling_threshold = 0.5     # Co-change threshold for ghost coupling detection
 god_module_complexity = 50         # Cyclomatic complexity threshold for god module
 god_module_loc = 500               # LOC threshold for god module

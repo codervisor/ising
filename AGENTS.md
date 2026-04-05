@@ -52,7 +52,7 @@ ising signals                         # View cross-layer anomalies
 ising hotspots --top 20               # View change hotspots
 ising stats                           # Global graph statistics
 ising boundaries                      # Detected module boundaries
-ising export                          # Export graph (JSON, Dot, Mermaid, VizJson)
+ising export --format json            # Export graph (json, dot, mermaid, viz-json)
 ising serve --port 3000               # Start MCP server
 ```
 
