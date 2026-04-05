@@ -8,18 +8,23 @@
 
 1. **Builds a graph** from source code (Tree-sitter) and git history (gix) with three layers: structural, change, defect
 2. **Computes risk** for every module: how much change pressure it faces vs. how much it can absorb
-3. **Detects signals** like ghost coupling, dependency cycles, god modules
+3. **Detects 16 signal types** like ghost coupling, dependency cycles, god modules, ticking bombs, shotgun surgery
 4. **Simulates changes** to predict blast radius before code is written
-5. **Serves results** to AI coding agents via MCP tools
+5. **Computes health index** -- aggregate repository grade (A--F) from zone distribution, coupling, and signal penalties
+6. **Serves results** to AI coding agents via MCP tools
 
 ### Key Concepts
 
 | Concept | Meaning |
 |---|---|
 | **Safety Factor (SF)** | `capacity / risk_score`. The primary health metric. SF < 1.0 = critical. |
-| **Capacity** | Module resilience: inverse of complexity + instability + coupling. Range [0.05, 1.0]. |
-| **Risk Score** | Change load + propagated risk from neighbors. |
-| **Safety Zone** | Classification: Critical, Danger, Warning, Healthy, Stable. |
+| **Capacity** | Module resilience: `1.0 - (complexity*0.4 + instability*0.3 + coupling*0.3)`. Range [0.05, 1.0]. |
+| **Change Load** | `normalize(defect_churn*3 + feature_churn)`, falls back to `change_freq * churn_rate`. |
+| **Risk Score** | Change load + propagated risk from neighbors via Jacobi iteration. |
+| **Direct Score** | `change_load / capacity` -- local risk without propagation, used for tier ranking. |
+| **Safety Zone** | Absolute classification: Critical (<1.0), Danger (1.0--1.5), Warning (1.5--2.0), Healthy (2.0--3.0), Stable (>3.0). |
+| **Risk Tier** | Relative percentile ranking: Critical (top 1%), High (top 5%), Medium (top 15%), Normal (rest). |
+| **Health Index** | Aggregate grade: `zone_sub_score × coupling_modifier × signal_factor`. A>=0.85, B>=0.70, C>=0.55, D>=0.40. |
 | **Signal** | Cross-layer anomaly (e.g., ghost coupling = files co-change without structural dependency). |
 
 ### Architecture
@@ -27,9 +32,9 @@
 ```
 ising-core/       Types, config, graph model, metrics
 ising-builders/   Graph construction (Tree-sitter + git)
-ising-analysis/   Risk computation, signals, hotspots
+ising-analysis/   Risk computation, signals, hotspots, health index
 ising-db/         SQLite persistence and queries
-ising-cli/        CLI: build, safety, simulate, signals, hotspots, serve
+ising-cli/        CLI: build, safety, health, simulate, impact, signals, hotspots, serve
 ising-server/     HTTP/MCP server for AI agent integration
 ising-scip/       SCIP index loader (alternative to Tree-sitter)
 ```
@@ -40,10 +45,15 @@ ising-scip/       SCIP index loader (alternative to Tree-sitter)
 ising build --repo-path <path>        # Build graph + compute risk
 ising safety --top 20                 # View riskiest modules
 ising safety --zone critical          # Filter by zone
+ising health                          # Aggregate repository health grade
 ising simulate <file>                 # Predict blast radius of a change
+ising impact <file>                   # Dependencies, risk signals for a file
 ising signals                         # View cross-layer anomalies
 ising hotspots --top 20               # View change hotspots
-ising serve --port 8080               # Start MCP server
+ising stats                           # Global graph statistics
+ising boundaries                      # Detected module boundaries
+ising export                          # Export graph (JSON, Dot, Mermaid, VizJson)
+ising serve --port 3000               # Start MCP server
 ```
 
 ## Skills
