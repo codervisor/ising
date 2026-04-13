@@ -1,5 +1,5 @@
 [workspace]
-members = ["ising-core", "ising-scip", "ising-cli", "ising-db", "ising-builders", "ising-analysis", "ising-server"]
+members = ["ising-core", "ising-scip", "ising-cli", "ising-db", "ising-builders", "ising-analysis", "ising-server", "ising-observer"]
 resolver = "2"
 
 [workspace.package]
